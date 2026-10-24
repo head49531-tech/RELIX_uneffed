@@ -1,0 +1,448 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+
+	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/widget"
+)
+
+type DNAPreset struct {
+	Name         string             `json:"name"`
+	Description  string             `json:"description"`
+	DNA          []byte             `json:"dna"`
+	Genes        []*Gene            `json:"genes"`
+	Pathways     []PathwayStep      `json:"pathways,omitempty"`
+	InitMRNA     map[string]float64 `json:"init_mrna,omitempty"`
+	InitProteins map[string]float64 `json:"init_proteins,omitempty"`
+	Builtin      bool               `json:"-"`
+}
+
+func presetsDir() string {
+	base, err := os.UserConfigDir()
+	if err != nil || base == "" {
+		base = "."
+	}
+	return filepath.Join(base, "relix", "presets")
+}
+
+func (p *DNAPreset) filePath() string {
+	return filepath.Join(presetsDir(), sanitizeID(p.Name)+".json")
+}
+
+func cloneGenes(src []*Gene) []*Gene {
+	out := make([]*Gene, 0, len(src))
+	for _, g := range src {
+		c := *g
+		c.Activators = append([]string{}, g.Activators...)
+		c.Repressors = append([]string{}, g.Repressors...)
+		c.Inducers = append([]string{}, g.Inducers...)
+		c.InducerModes = append([]string{}, g.InducerModes...)
+		c.InducerKs = append([]float64{}, g.InducerKs...)
+		out = append(out, &c)
+	}
+	return out
+}
+
+func (p *DNAPreset) genomeFromPreset() *Genome {
+	return &Genome{
+		DNA:      append([]byte{}, p.DNA...),
+		Genes:    cloneGenes(p.Genes),
+		Pathways: append([]PathwayStep{}, p.Pathways...),
+	}
+}
+
+func loadUserPresets() ([]*DNAPreset, []error) {
+	dir := presetsDir()
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return nil, []error{err}
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, []error{err}
+	}
+	var out []*DNAPreset
+	var errs []error
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		var p DNAPreset
+		if err := json.Unmarshal(data, &p); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", e.Name(), err))
+			continue
+		}
+		if p.Name == "" {
+			p.Name = strings.TrimSuffix(e.Name(), ".json")
+		}
+		p.Builtin = false
+		out = append(out, &p)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, errs
+}
+
+func saveUserPreset(p *DNAPreset) error {
+	dir := presetsDir()
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(p, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(p.filePath(), data, 0644)
+}
+
+func builtinPresets() []*DNAPreset {
+	return []*DNAPreset{
+		builtinMinimal(),
+		builtinEnergy(),
+		builtinToggle(),
+		builtinRepressilator(),
+		builtinQuorum(),
+		builtinFullGRN(),
+	}
+}
+
+const (
+	presetPromoter = "AAAAAAAAAAAAAAAAAAAA"
+	presetRBS      = "GGGAGGAGG"
+	presetCDS      = "ATGCGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGC"
+)
+
+func builtinMinimal() *DNAPreset {
+	g := &Genome{}
+	g.addGene(&Gene{
+		Name: "gene1", Product: "Protein1",
+		BasalTranscription: 0.1, ActivationK: 20, RepressionK: 20, HillN: 2,
+	}, presetPromoter, presetRBS, presetCDS)
+	return &DNAPreset{
+		Name: "Minimal", Description: "Single always-on gene. Blank slate.",
+		DNA: g.DNA, Genes: cloneGenes(g.Genes), Builtin: true,
+	}
+}
+
+func builtinEnergy() *DNAPreset {
+	g := &Genome{}
+	g.addGene(&Gene{
+		Name: "metA", Product: "MetA_enzyme",
+		BasalTranscription: 0.5, ActivationK: 20, RepressionK: 20, HillN: 2,
+	}, presetPromoter, presetRBS, presetCDS)
+	return &DNAPreset{
+		Name: "Energy", Description: "Single metA gene. Produces ATP.",
+		DNA: g.DNA, Genes: cloneGenes(g.Genes), Builtin: true,
+	}
+}
+
+func builtinToggle() *DNAPreset {
+	g := &Genome{}
+	g.addGene(&Gene{
+		Name: "togA", Product: "TogA_TF",
+		BasalTranscription: 0.3, ActivationK: 20, RepressionK: 15, HillN: 3,
+		Repressors: []string{"TogB_TF"},
+	}, presetPromoter, presetRBS, presetCDS)
+	g.addGene(&Gene{
+		Name: "togB", Product: "TogB_TF",
+		BasalTranscription: 0.3, ActivationK: 20, RepressionK: 15, HillN: 3,
+		Repressors: []string{"TogA_TF"},
+	}, presetPromoter, presetRBS, presetCDS)
+	return &DNAPreset{
+		Name: "Toggle Switch", Description: "Bistable 2-gene toggle. Initial bias favors A.",
+		DNA: g.DNA, Genes: cloneGenes(g.Genes),
+		InitMRNA: map[string]float64{"togA": 3.0},
+		Builtin:  true,
+	}
+}
+
+func builtinRepressilator() *DNAPreset {
+	g := &Genome{}
+	g.addGene(&Gene{
+		Name: "cI", Product: "cI_TF",
+		BasalTranscription: 0.05, ActivationK: 20, RepressionK: 15, HillN: 3,
+		Repressors: []string{"TetR_TF"},
+	}, presetPromoter, presetRBS, presetCDS)
+	g.addGene(&Gene{
+		Name: "LacI", Product: "LacI_TF",
+		BasalTranscription: 0.05, ActivationK: 20, RepressionK: 15, HillN: 3,
+		Repressors: []string{"cI_TF"},
+	}, presetPromoter, presetRBS, presetCDS)
+	g.addGene(&Gene{
+		Name: "TetR", Product: "TetR_TF",
+		BasalTranscription: 0.05, ActivationK: 20, RepressionK: 15, HillN: 3,
+		Repressors: []string{"LacI_TF"},
+	}, presetPromoter, presetRBS, presetCDS)
+	return &DNAPreset{
+		Name: "Repressilator", Description: "3-gene oscillator (Elowitz & Leibler 2000).",
+		DNA: g.DNA, Genes: cloneGenes(g.Genes),
+		InitMRNA: map[string]float64{"cI": 3.0, "LacI": 0.1, "TetR": 0.1},
+		Builtin:  true,
+	}
+}
+
+func builtinQuorum() *DNAPreset {
+	g := &Genome{}
+	g.addGene(&Gene{
+		Name: "luxI", Product: "LuxI_enzyme",
+		BasalTranscription: 0.5, ActivationK: 20, RepressionK: 20, HillN: 2,
+		ProducesAHL: true, AHLRate: 0.5,
+	}, presetPromoter, presetRBS, presetCDS)
+	g.addGene(&Gene{
+		Name: "response", Product: "Response_protein",
+		BasalTranscription: 0.01, ActivationK: 20, RepressionK: 20, HillN: 2,
+		QuorumReg: true, QuorumMode: "activate", QuorumK: 5,
+	}, presetPromoter, presetRBS, presetCDS)
+	return &DNAPreset{
+		Name: "Quorum Sensor", Description: "LuxI + AHL-activated response gene.",
+		DNA: g.DNA, Genes: cloneGenes(g.Genes), Builtin: true,
+	}
+}
+
+func builtinFullGRN() *DNAPreset {
+	g := NewGenome()
+	return &DNAPreset{
+		Name: "Full GRN", Description: "Default 4-gene network with inducer + quorum.",
+		DNA: g.DNA, Genes: cloneGenes(g.Genes), Builtin: true,
+	}
+}
+
+func (u *UI) refreshPresetsList() {
+	builtins := builtinPresets()
+	users, _ := loadUserPresets()
+	u.presetsCache = append(builtins, users...)
+	if u.presetList != nil {
+		u.presetList.Refresh()
+	}
+	if u.selectedPresetIdx >= len(u.presetsCache) {
+		u.selectedPresetIdx = -1
+	}
+	u.refreshPresetPreview()
+}
+
+func (u *UI) selectedPreset() *DNAPreset {
+	if u.selectedPresetIdx < 0 || u.selectedPresetIdx >= len(u.presetsCache) {
+		return nil
+	}
+	return u.presetsCache[u.selectedPresetIdx]
+}
+
+func (u *UI) refreshPresetPreview() {
+	if u.presetPreview == nil {
+		return
+	}
+	p := u.selectedPreset()
+	if p == nil {
+		u.presetPreview.SetText("Select a preset from the list.")
+		return
+	}
+	tag := "user"
+	if p.Builtin {
+		tag = "built-in"
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "%s (%s)\n\n", p.Name, tag)
+	fmt.Fprintf(&sb, "%s\n\n", p.Description)
+	fmt.Fprintf(&sb, "Genes:     %d\n", len(p.Genes))
+	fmt.Fprintf(&sb, "DNA:       %d bp\n", len(p.DNA))
+	fmt.Fprintf(&sb, "Pathways:  %d\n", len(p.Pathways))
+	if len(p.InitMRNA) > 0 {
+		fmt.Fprintf(&sb, "Seed mRNA: %v\n", p.InitMRNA)
+	}
+	if len(p.Genes) > 0 {
+		sb.WriteString("\nGenes:\n")
+		for _, g := range p.Genes {
+			fmt.Fprintf(&sb, "  %-10s → %-14s (basal %.2f)\n", g.Name, g.Product, g.BasalTranscription)
+		}
+	}
+	u.presetPreview.SetText(sb.String())
+}
+
+func (u *UI) saveCurrentAsPreset() {
+	c := u.getSelectedCell()
+	if c == nil {
+		dialog.ShowInformation("Save preset", "Select a cell first.", u.window)
+		return
+	}
+	nameIn := widget.NewEntry()
+	nameIn.SetPlaceHolder("My circuit")
+	descIn := widget.NewMultiLineEntry()
+	descIn.SetPlaceHolder("Optional description")
+
+	dialog.ShowForm("Save current cell as preset", "Save", "Cancel",
+		[]*widget.FormItem{
+			{Text: "Name", Widget: nameIn},
+			{Text: "Description", Widget: descIn},
+		}, func(ok bool) {
+			if !ok {
+				return
+			}
+			name := strings.TrimSpace(nameIn.Text)
+			if name == "" {
+				dialog.ShowInformation("Save preset", "Name required.", u.window)
+				return
+			}
+			p := &DNAPreset{
+				Name:        name,
+				Description: strings.TrimSpace(descIn.Text),
+				DNA:         append([]byte{}, c.Genome.DNA...),
+				Genes:       cloneGenes(c.Genome.Genes),
+				Pathways:    append([]PathwayStep{}, c.Genome.Pathways...),
+			}
+			if err := saveUserPreset(p); err != nil {
+				dialog.ShowError(err, u.window)
+				return
+			}
+			u.refreshPresetsList()
+			dialog.ShowInformation("Saved", "Preset saved as "+p.Name, u.window)
+		}, u.window)
+}
+
+func (u *UI) loadPresetIntoCurrentCell() {
+	p := u.selectedPreset()
+	if p == nil {
+		dialog.ShowInformation("Load preset", "Select a preset first.", u.window)
+		return
+	}
+	c := u.getSelectedCell()
+	if c == nil {
+		dialog.ShowInformation("Load preset", "Select a cell first.", u.window)
+		return
+	}
+	c.Genome = p.genomeFromPreset()
+	c.MRNA = map[string]float64{}
+	c.Proteins = map[string]float64{}
+	c.Metabolites = map[string]float64{}
+	for k, v := range p.InitMRNA {
+		c.MRNA[k] = v
+	}
+	for k, v := range p.InitProteins {
+		c.Proteins[k] = v
+	}
+	u.renderGenome()
+	u.refreshSpecies()
+	u.refreshDetail()
+	dialog.ShowInformation("Loaded", fmt.Sprintf("Preset '%s' loaded into cell #%d", p.Name, c.ID), u.window)
+}
+
+func (u *UI) spawnCellFromPreset() {
+	p := u.selectedPreset()
+	if p == nil {
+		dialog.ShowInformation("Spawn cell", "Select a preset first.", u.window)
+		return
+	}
+	if len(u.sim.Cells) >= u.sim.Params.MaxCells {
+		dialog.ShowInformation("Cannot spawn", "Max cells reached.", u.window)
+		return
+	}
+	c := &Cell{
+		ID:          u.sim.NextID,
+		Generation:  0,
+		Alive:       true,
+		Genome:      p.genomeFromPreset(),
+		MRNA:        map[string]float64{},
+		Proteins:    map[string]float64{},
+		Metabolites: map[string]float64{},
+		Glucose:     10,
+		ATP:         5,
+	}
+	u.sim.NextID++
+	for k, v := range p.InitMRNA {
+		c.MRNA[k] = v
+	}
+	for k, v := range p.InitProteins {
+		c.Proteins[k] = v
+	}
+	u.sim.Cells = append(u.sim.Cells, c)
+	u.selectedCell = c.ID
+	u.render()
+	dialog.ShowInformation("Spawned", fmt.Sprintf("New cell #%d from preset '%s'", c.ID, p.Name), u.window)
+}
+
+func (u *UI) deleteSelectedPreset() {
+	p := u.selectedPreset()
+	if p == nil {
+		dialog.ShowInformation("Delete preset", "Select a preset first.", u.window)
+		return
+	}
+	if p.Builtin {
+		dialog.ShowInformation("Delete preset", "Built-in presets cannot be deleted.", u.window)
+		return
+	}
+	dialog.ShowConfirm("Delete preset", "Delete '"+p.Name+"'?", func(ok bool) {
+		if !ok {
+			return
+		}
+		if err := os.Remove(p.filePath()); err != nil {
+			dialog.ShowError(err, u.window)
+			return
+		}
+		u.selectedPresetIdx = -1
+		u.refreshPresetsList()
+	}, u.window)
+}
+
+func (u *UI) buildPresetsTab() fyne.CanvasObject {
+	saveBtn := widget.NewButton("Save current cell as preset…", u.saveCurrentAsPreset)
+	refreshBtn := widget.NewButton("Refresh", u.refreshPresetsList)
+	folderBtn := widget.NewButton("Show folder path", func() {
+		dialog.ShowInformation("Presets folder", presetsDir(), u.window)
+	})
+
+	u.presetList = widget.NewList(
+		func() int { return len(u.presetsCache) },
+		func() fyne.CanvasObject {
+			return widget.NewLabel("template")
+		},
+		func(i widget.ListItemID, o fyne.CanvasObject) {
+			if i < 0 || i >= len(u.presetsCache) {
+				return
+			}
+			p := u.presetsCache[i]
+			tag := "(user)"
+			if p.Builtin {
+				tag = "(built-in)"
+			}
+			o.(*widget.Label).SetText(fmt.Sprintf("%-13s %s", tag, p.Name))
+		},
+	)
+	u.presetList.OnSelected = func(id widget.ListItemID) {
+		if id < 0 || id >= len(u.presetsCache) {
+			return
+		}
+		u.selectedPresetIdx = id
+		u.refreshPresetPreview()
+	}
+
+	u.presetPreview = widget.NewLabel("Select a preset from the list.")
+	u.presetPreview.Wrapping = fyne.TextWrapWord
+	u.presetPreview.TextStyle = fyne.TextStyle{Monospace: true}
+
+	loadBtn := widget.NewButton("Load into selected cell", u.loadPresetIntoCurrentCell)
+	spawnBtn := widget.NewButton("Spawn new cell from preset", u.spawnCellFromPreset)
+	deleteBtn := widget.NewButton("Delete preset", u.deleteSelectedPreset)
+
+	top := container.NewVBox(
+		container.NewHBox(saveBtn, refreshBtn, folderBtn),
+		widget.NewSeparator(),
+	)
+	actions := container.NewHBox(loadBtn, spawnBtn, deleteBtn)
+	right := container.NewBorder(nil, actions, nil, nil,
+		container.NewVScroll(u.presetPreview))
+	split := container.NewHSplit(u.presetList, right)
+	split.SetOffset(0.4)
+
+	u.refreshPresetsList()
+	return container.NewBorder(top, nil, nil, nil, split)
+}

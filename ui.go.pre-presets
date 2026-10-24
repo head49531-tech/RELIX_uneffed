@@ -1,0 +1,988 @@
+package main
+
+import (
+	"fmt"
+	"image"
+	"image/color"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/canvas"
+	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/theme"
+	"fyne.io/fyne/v2/widget"
+)
+
+var nucleotideColors = map[byte]color.Color{
+	'A': color.RGBA{220, 80, 80, 255},
+	'T': color.RGBA{80, 200, 80, 255},
+	'G': color.RGBA{80, 120, 220, 255},
+	'C': color.RGBA{220, 200, 60, 255},
+}
+
+type UI struct {
+	window fyne.Window
+	sim    *Sim
+
+	tickLabel  *widget.Label
+	aliveLabel *widget.Label
+	genLabel   *widget.Label
+	envLabel   *widget.Label
+
+	playBtn  *widget.Button
+	stepBtn  *widget.Button
+	resetBtn *widget.Button
+
+	cellList *widget.List
+
+	genomeCanvas *fyne.Container
+	genomeScroll *container.Scroll
+	dnaText      *widget.Entry
+	selectedGene int
+
+	mrnaList    *widget.List
+	proteinList *widget.List
+
+	detailBox *fyne.Container
+	seriesCv  *canvas.Raster
+
+	muVal   *widget.Label
+	drVal   *widget.Label
+	daVal   *widget.Label
+	spVal   *widget.Label
+
+	iptgSlider *widget.Slider
+	iptgVal    *widget.Label
+	atcSlider  *widget.Slider
+	atcVal     *widget.Label
+	araSlider  *widget.Slider
+	araVal     *widget.Label
+	stochCheck *widget.Check
+	chemA          *widget.Select
+	chemB          *widget.Select
+	chemPreview    *widget.Label
+	pendingProduct *ChemSpecies
+	chemBox        *fyne.Container
+	chemSearch     *widget.Entry
+	ahlLabel   *widget.Label
+	muSlider *widget.Slider
+	drSlider *widget.Slider
+	daSlider *widget.Slider
+	spSlider *widget.Slider
+	mcEntry  *widget.Entry
+
+	lineageCv       *canvas.Raster
+	phaseCv         *canvas.Raster
+	phaseX          *widget.Select
+	phaseY          *widget.Select
+	doseCv          *canvas.Raster
+	doseParam       *widget.Select
+	doseOut         *widget.Select
+	doseFit         *widget.Label
+	dosePoints      []DosePoint
+	doseFitK        float64
+	doseFitN        float64
+	doseYMin        float64
+	doseYMax        float64
+	chemSliders     map[string]*widget.Slider
+	chemVals        map[string]*widget.Label
+	chemStressLabel *widget.Label
+	pathwayBox      *fyne.Container
+	fbaOutput   *widget.Entry
+	bifurcationData []BifurcationPoint
+	digestText   *widget.Entry
+	digestCv     *canvas.Raster
+	digestCircular *widget.Check
+	digestResults []DigestResult
+	plasmidCv     *canvas.Raster
+	plasmidLegend *fyne.Container
+	seriesTraj  *widget.Entry
+	bifurcOut   *widget.Entry
+	bifurcCv    *canvas.Raster
+	hwOutput    *widget.Entry
+	selectedCell int
+	playing      bool
+	speed        time.Duration
+	nextTick     time.Time
+	stopCh       chan struct{}
+	sortedCache  []*Cell
+	seriesName   string
+}
+
+func NewUI(w fyne.Window) *UI {
+	u := &UI{
+		window:       w,
+		sim:          NewSim(DefaultParams(), time.Now().UnixNano()),
+		selectedCell: -1,
+		selectedGene: -1,
+		speed:        300 * time.Millisecond,
+		stopCh:       make(chan struct{}),
+		seriesName:   "MetA_enzyme",
+	}
+	u.buildUI()
+	u.setupMenu()
+	u.startLoop()
+	u.render()
+	return u
+}
+
+func mono(s string) *widget.Label {
+	return widget.NewLabelWithStyle(s, fyne.TextAlignLeading, fyne.TextStyle{Monospace: true})
+}
+
+func (u *UI) buildUI() {
+	u.tickLabel = mono("tick 0")
+	u.aliveLabel = mono("alive 0")
+	u.genLabel = mono("gen 0")
+	u.envLabel = mono("env 0")
+	u.ahlLabel = mono("AHL 0.00")
+
+	u.playBtn = widget.NewButtonWithIcon("Play", theme.MediaPlayIcon(), u.togglePlay)
+	u.stepBtn = widget.NewButtonWithIcon("Step", theme.MediaSkipNextIcon(), u.step)
+	u.resetBtn = widget.NewButtonWithIcon("Reset", theme.ViewRefreshIcon(), u.reset)
+
+	top := container.NewHBox(
+		widget.NewLabelWithStyle("RELIX", fyne.TextAlignLeading, fyne.TextStyle{Bold: true, Monospace: true}),
+		widget.NewSeparator(),
+		u.playBtn, u.stepBtn, u.resetBtn,
+		widget.NewSeparator(),
+		u.tickLabel, u.aliveLabel, u.genLabel, u.envLabel, u.ahlLabel,
+	)
+
+	// --- Cell list ---
+	u.cellList = widget.NewList(
+		func() int { return len(u.sortedCache) },
+		func() fyne.CanvasObject {
+			return widget.NewLabelWithStyle("template", fyne.TextAlignLeading, fyne.TextStyle{Monospace: true})
+		},
+		func(i widget.ListItemID, o fyne.CanvasObject) {
+			if i >= len(u.sortedCache) {
+				return
+			}
+			c := u.sortedCache[i]
+			mark := "●"
+			if !c.Alive {
+				mark = "○"
+			}
+			o.(*widget.Label).SetText(fmt.Sprintf("%s #%d g%d", mark, c.ID, c.Generation))
+		},
+	)
+	u.cellList.OnSelected = func(id widget.ListItemID) {
+		if id >= len(u.sortedCache) {
+			return
+		}
+		u.selectedCell = u.sortedCache[id].ID
+		u.selectedGene = -1
+		u.renderGenome()
+		u.refreshSpecies()
+		u.refreshDetail()
+	}
+	left := container.NewBorder(
+		widget.NewLabelWithStyle("Cells", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		nil, nil, nil, u.cellList,
+	)
+
+	// --- Genome view ---
+	u.genomeCanvas = container.NewHBox()
+	u.genomeScroll = container.NewHScroll(u.genomeCanvas)
+	u.dnaText = widget.NewMultiLineEntry()
+	u.dnaText.Wrapping = fyne.TextWrapBreak
+	u.dnaText.OnChanged = nil
+
+	dnaApply := widget.NewButton("Apply DNA Edit", func() {
+		c := u.getSelectedCell()
+		if c == nil {
+			return
+		}
+		c.Genome.DNA = []byte(u.dnaText.Text)
+		// clamp genes
+		for _, g := range c.Genome.Genes {
+			if g.CDSEnd > len(c.Genome.DNA) {
+				g.CDSEnd = len(c.Genome.DNA)
+			}
+		}
+		u.renderGenome()
+		u.refreshSpecies()
+	})
+
+	geneLabel := widget.NewLabelWithStyle("Genome (click gene to select, click nucleotide to edit)", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+
+	centerInner := container.NewBorder(
+		container.NewVBox(geneLabel, u.genomeScroll, widget.NewLabel("Raw DNA:"), u.dnaText, dnaApply),
+		nil, nil, nil, nil,
+	)
+
+	// --- Species panels ---
+	u.mrnaList = widget.NewList(
+		func() int { return 0 },
+		func() fyne.CanvasObject { return mono("template") },
+		func(i widget.ListItemID, o fyne.CanvasObject) {},
+	)
+	u.proteinList = widget.NewList(
+		func() int { return 0 },
+		func() fyne.CanvasObject { return mono("template") },
+		func(i widget.ListItemID, o fyne.CanvasObject) {},
+	)
+
+	mrnaLabel := widget.NewLabelWithStyle("mRNA (transcripts)", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	proteinLabel := widget.NewLabelWithStyle("Proteins", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+
+	speciesPanel := container.NewVBox(
+		mrnaLabel, u.mrnaList,
+		widget.NewSeparator(),
+		proteinLabel, u.proteinList,
+	)
+
+	// --- Detail + series ---
+	u.detailBox = container.NewVBox(widget.NewLabelWithStyle("— select a cell —", fyne.TextAlignLeading, fyne.TextStyle{Italic: true}))
+	
+	u.seriesCv = canvas.NewRasterWithPixels(u.seriesPixels)
+	u.seriesCv.SetMinSize(fyne.NewSize(280, 80))
+
+	seriesSelector := widget.NewSelect([]string{"MetA_enzyme", "RegA_TF", "RegB_TF", "ATP", "Glucose", "Population"}, func(s string) {
+		u.seriesName = s
+		u.render()
+	})
+	seriesSelector.SetSelected(u.seriesName)
+
+	u.pathwayBox = container.NewVBox(mono("(no pathway steps)"))
+
+	right := container.NewVScroll(container.NewVBox(
+		u.detailBox,
+		widget.NewSeparator(),
+		speciesPanel,
+		widget.NewSeparator(),
+		widget.NewLabelWithStyle("Time series", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		seriesSelector,
+		u.seriesCv,
+		widget.NewSeparator(),
+		widget.NewLabelWithStyle("Metabolic Pathways", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		u.pathwayBox,
+		widget.NewButton("+ Add Step", u.showAddPathDialog),
+	))
+
+	// --- Bottom params ---
+	p := u.sim.Params
+	u.muSlider = widget.NewSlider(0, 0.5)
+	u.muSlider.Value = p.MutationRate
+	u.muVal = mono(fmt.Sprintf("%.2f", p.MutationRate))
+	u.muSlider.OnChanged = func(v float64) {
+		u.muVal.SetText(fmt.Sprintf("%.2f", v))
+		u.sim.Params.MutationRate = v
+	}
+
+	u.drSlider = widget.NewSlider(0, 0.02)
+	u.drSlider.Value = p.BaseDeathRate
+	u.drVal = mono(fmt.Sprintf("%.4f", p.BaseDeathRate))
+	u.drSlider.OnChanged = func(v float64) {
+		u.drVal.SetText(fmt.Sprintf("%.4f", v))
+		u.sim.Params.BaseDeathRate = v
+	}
+
+	u.daSlider = widget.NewSlider(2, 30)
+	u.daSlider.Value = p.DivisionATP
+	u.daVal = mono(fmt.Sprintf("%.1f", p.DivisionATP))
+	u.daSlider.OnChanged = func(v float64) {
+		u.daVal.SetText(fmt.Sprintf("%.1f", v))
+		u.sim.Params.DivisionATP = v
+	}
+
+	u.spSlider = widget.NewSlider(20, 1000)
+	u.spSlider.Value = 300
+	u.spVal = mono("300ms")
+	u.spSlider.OnChanged = func(v float64) {
+		u.speed = time.Duration(v) * time.Millisecond
+		u.spVal.SetText(fmt.Sprintf("%dms", int(v)))
+	}
+
+	u.mcEntry = widget.NewEntry()
+	u.mcEntry.SetText(strconv.Itoa(p.MaxCells))
+	u.mcEntry.OnChanged = func(s string) {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 {
+			u.sim.Params.MaxCells = n
+		}
+	}
+
+	u.iptgSlider = widget.NewSlider(0, 10)
+	u.iptgSlider.Step = 0.1
+	u.iptgVal = mono("0.0")
+	u.iptgSlider.OnChanged = func(v float64) {
+		u.iptgVal.SetText(fmt.Sprintf("%.1f", v))
+		u.sim.Inducers["IPTG"] = v
+	}
+
+	u.atcSlider = widget.NewSlider(0, 10)
+	u.atcSlider.Step = 0.1
+	u.atcVal = mono("0.0")
+	u.atcSlider.OnChanged = func(v float64) {
+		u.atcVal.SetText(fmt.Sprintf("%.1f", v))
+		u.sim.Inducers["aTc"] = v
+	}
+
+	u.araSlider = widget.NewSlider(0, 10)
+	u.araSlider.Step = 0.1
+	u.araVal = mono("0.0")
+	u.araSlider.OnChanged = func(v float64) {
+		u.araVal.SetText(fmt.Sprintf("%.1f", v))
+		u.sim.Inducers["Arabinose"] = v
+	}
+
+	u.stochCheck = widget.NewCheck("Stochastic", func(b bool) {
+		u.sim.Stochastic = b
+	})
+
+	bottomRow1 := container.NewHBox(
+		widget.NewLabel("Mutation"), u.muSlider, u.muVal,
+		widget.NewSeparator(),
+		widget.NewLabel("Death"), u.drSlider, u.drVal,
+		widget.NewSeparator(),
+		widget.NewLabel("Division ATP"), u.daSlider, u.daVal,
+		widget.NewSeparator(),
+		widget.NewLabel("Max cells"), u.mcEntry,
+		widget.NewSeparator(),
+		widget.NewLabel("Speed"), u.spSlider, u.spVal,
+	)
+	bottomRow2 := container.NewHBox(
+		widget.NewLabel("IPTG"), u.iptgSlider, u.iptgVal,
+		widget.NewSeparator(),
+		widget.NewLabel("aTc"), u.atcSlider, u.atcVal,
+		widget.NewSeparator(),
+		widget.NewLabel("Ara"), u.araSlider, u.araVal,
+		widget.NewSeparator(),
+		u.stochCheck,
+	)
+	bottom := container.NewVBox(bottomRow1, bottomRow2)
+
+	// Analytics widgets
+	u.lineageCv = canvas.NewRaster(func(w, h int) image.Image {
+		root, maxDepth := u.sim.BuildLineage(400)
+		return renderLineage(root, maxDepth, w, h)
+	})
+	u.lineageCv.SetMinSize(fyne.NewSize(800, 600))
+
+	speciesOpts := u.speciesOptions()
+	u.phaseX = widget.NewSelect(speciesOpts, func(s string) {
+		if u.phaseCv != nil { u.phaseCv.Refresh() }
+	})
+	u.phaseY = widget.NewSelect(speciesOpts, func(s string) {
+		if u.phaseCv != nil { u.phaseCv.Refresh() }
+	})
+	if len(speciesOpts) > 0 { u.phaseX.SetSelected(speciesOpts[0]) }
+	if len(speciesOpts) > 1 { u.phaseY.SetSelected(speciesOpts[1]) }
+	u.phaseCv = canvas.NewRaster(func(w, h int) image.Image {
+		return renderPhase(u.sim.PhaseData(u.phaseX.Selected, u.phaseY.Selected), w, h)
+	})
+	u.phaseCv.SetMinSize(fyne.NewSize(600, 500))
+
+	u.doseParam = widget.NewSelect([]string{"IPTG", "aTc", "Arabinose", "DivisionATP", "TranslationK", "BaseDeathRate", "EnvGlucose"}, nil)
+	u.doseParam.SetSelected("IPTG")
+	u.doseOut = widget.NewSelect(speciesOpts, nil)
+	if len(speciesOpts) > 0 { u.doseOut.SetSelected(speciesOpts[0]) }
+	u.doseCv = canvas.NewRaster(func(w, h int) image.Image {
+		return renderDose(u.dosePoints, u.doseFitK, u.doseFitN, u.doseYMin, u.doseYMax, w, h)
+	})
+	u.doseCv.SetMinSize(fyne.NewSize(600, 500))
+	u.doseFit = mono("Hill fit: not run yet")
+	doseBtn := widget.NewButton("Run Dose Sweep", u.runDoseResponse)
+
+	u.chemSliders = make(map[string]*widget.Slider)
+	u.chemVals = make(map[string]*widget.Label)
+	u.chemSliders = make(map[string]*widget.Slider)
+	u.chemVals = make(map[string]*widget.Label)
+	u.chemBox = container.NewVBox()
+	u.chemStressLabel = mono("Total toxicity: 0.00 | Nutrient x1.00")
+
+	u.chemSearch = widget.NewEntry()
+	u.chemSearch.SetPlaceHolder("Search name / formula / category…")
+	u.chemSearch.OnChanged = func(s string) { u.rebuildChemBox(s) }
+
+	u.rebuildChemBox("")
+
+	chemHeader := container.NewVBox(
+		widget.NewLabelWithStyle("Chemical exposure", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		u.chemSearch,
+	)
+	chemScroll := container.NewBorder(chemHeader, nil, nil, nil, container.NewVScroll(u.chemBox))
+
+	phaseHeader := container.NewHBox(widget.NewLabel("X:"), u.phaseX, widget.NewLabel("Y:"), u.phaseY)
+	doseHeader := container.NewVBox(
+		container.NewHBox(widget.NewLabel("Sweep:"), u.doseParam, widget.NewLabel("Output:"), u.doseOut, doseBtn),
+		u.doseFit,
+	)
+
+	bifurcParam := widget.NewSelect([]string{"division_atp", "translation_k", "base_death_rate", "env_glucose"}, nil)
+	bifurcParam.SetSelected("division_atp")
+	estParam := widget.NewSelect([]string{"translation_k", "division_atp", "base_death_rate", "mutation_rate"}, nil)
+	estParam.SetSelected("translation_k")
+
+
+	u.fbaOutput = widget.NewMultiLineEntry()
+	u.fbaOutput.Wrapping = fyne.TextWrapWord
+	u.fbaOutput.TextStyle = fyne.TextStyle{Monospace: true}
+
+	u.seriesTraj = widget.NewMultiLineEntry()
+	u.seriesTraj.Wrapping = fyne.TextWrapOff
+	u.seriesTraj.TextStyle = fyne.TextStyle{Monospace: true}
+
+	u.bifurcOut = widget.NewMultiLineEntry()
+	u.bifurcOut.Wrapping = fyne.TextWrapOff
+	u.bifurcOut.TextStyle = fyne.TextStyle{Monospace: true}
+
+	u.bifurcCv = canvas.NewRaster(func(w, h int) image.Image {
+		return renderBifurcation(u.bifurcationData, w, h)
+	})
+	u.bifurcCv.SetMinSize(fyne.NewSize(600, 400))
+
+	u.hwOutput = widget.NewMultiLineEntry()
+	u.hwOutput.Wrapping = fyne.TextWrapWord
+	u.hwOutput.TextStyle = fyne.TextStyle{Monospace: true}
+
+	u.digestText = widget.NewMultiLineEntry()
+	u.digestText.Wrapping = fyne.TextWrapWord
+	u.digestText.TextStyle = fyne.TextStyle{Monospace: true}
+	u.digestText.SetPlaceHolder("Click 'Run Digest' to scan for restriction sites.")
+
+	u.digestCv = canvas.NewRaster(func(w, h int) image.Image {
+		return renderGel(u.digestResults, w, h)
+	})
+	u.digestCv.SetMinSize(fyne.NewSize(600, 400))
+
+	u.digestCircular = widget.NewCheck("Circular DNA", nil)
+
+	digestAllBtn := widget.NewButton("Run Digest (all enzymes)", func() {
+		c := u.getSelectedCell()
+		if c == nil {
+			u.digestText.SetText("Select a cell first.")
+			return
+		}
+		u.digestResults = DigestAll(c.Genome.DNA, u.digestCircular.Checked)
+		var sb strings.Builder
+		fmt.Fprintf(&sb, "DNA length: %d bp  |  mode: ", len(c.Genome.DNA))
+		if u.digestCircular.Checked {
+			sb.WriteString("circular\n\n")
+		} else {
+			sb.WriteString("linear\n\n")
+		}
+		for _, r := range u.digestResults {
+			sb.WriteString(FormatDigestReport(r, len(c.Genome.DNA), u.digestCircular.Checked))
+		}
+		u.digestText.SetText(sb.String())
+		u.digestCv.Refresh()
+	})
+
+
+	rightTabs := container.NewAppTabs(
+		container.NewTabItem("Detail", right),
+		container.NewTabItem("Lineage", u.lineageCv),
+		container.NewTabItem("Phase", container.NewBorder(phaseHeader, nil, nil, nil, u.phaseCv)),
+		container.NewTabItem("Dose", container.NewBorder(doseHeader, nil, nil, nil, u.doseCv)),
+		container.NewTabItem("Chemex", chemScroll),
+		container.NewTabItem("FBA", container.NewBorder(
+			container.NewHBox(widget.NewButton("Run FBA", func() {
+				c := u.getSelectedCell()
+				if c == nil { return }
+				r := u.sim.RunFBA(c, 50)
+				var sb strings.Builder
+				fmt.Fprintf(&sb, "Objective (ATP): %.2f\n", r.Objective)
+				if r.Bottleneck != "" {
+					fmt.Fprintf(&sb, "Bottleneck: %s\n", r.Bottleneck)
+				}
+				fmt.Fprintf(&sb, "\nFluxes:\n")
+				for k, v := range r.Fluxes {
+					fmt.Fprintf(&sb, "  %s : %.3f\n", k, v)
+				}
+				u.fbaOutput.SetText(sb.String())
+			})),
+			nil, nil, nil, u.fbaOutput)),
+		container.NewTabItem("Series", container.NewBorder(
+			container.NewHBox(widget.NewButton("Run Gillespie SSA", func() {
+				c := u.getSelectedCell()
+				if c == nil { return }
+				traj := u.sim.GillespieStochastic(c, 100.0, u.sim.Rng)
+				var sb strings.Builder
+				for k, v := range traj {
+					fmt.Fprintf(&sb, "%s : %v\n", k, v)
+				}
+				u.seriesTraj.SetText(sb.String())
+			})),
+			nil, nil, nil, u.seriesTraj)),
+		container.NewTabItem("Bifurcation", container.NewBorder(
+			container.NewVBox(
+				container.NewHBox(widget.NewLabel("Parameter:"), bifurcParam, widget.NewButton("Scan", func() {
+					u.bifurcationData = u.sim.BifurcationScan(bifurcParam.Selected, 2, 20, 20, 200)
+					var sb strings.Builder
+					fmt.Fprintf(&sb, "%-15s %-8s %-8s %s\n", "Param", "Alive", "MaxGen", "Regime")
+					for _, p := range u.bifurcationData {
+						fmt.Fprintf(&sb, "%-15.3f %-8d %-8d %s\n", p.ParamValue, p.Alive, p.MaxGen, p.Regime)
+					}
+					u.bifurcOut.SetText(sb.String())
+					u.bifurcCv.Refresh()
+				})),
+			),
+			nil, nil, nil,
+			container.NewVSplit(u.bifurcOut, u.bifurcCv))),
+		container.NewTabItem("Genetics", container.NewBorder(
+			container.NewHBox(widget.NewButton("Hardy-Weinberg", func() {
+				hw := u.sim.HardyWeinberg()
+				var sb strings.Builder
+				fmt.Fprintf(&sb, "Allele freq A: %.3f, a: %.3f\n", hw.Freq_A, hw.Freq_a)
+				fmt.Fprintf(&sb, "Expected: AA=%.1f Aa=%.1f aa=%.1f\n", hw.AA, hw.Aa, hw.aa)
+				fmt.Fprintf(&sb, "Observed: AA=%.0f Aa=%.0f aa=%.0f\n", hw.ObsAA, hw.ObsAa, hw.Obsaa)
+				fmt.Fprintf(&sb, "Chi-square: %.3f\n", hw.ChiSq)
+				u.hwOutput.SetText(sb.String())
+			})),
+			nil, nil, nil, u.hwOutput)),
+
+		container.NewTabItem("Digest", container.NewBorder(
+			container.NewHBox(
+				digestAllBtn,
+				widget.NewSeparator(),
+				u.digestCircular,
+			),
+			nil, nil, nil,
+			container.NewVSplit(u.digestText, u.digestCv))),
+		container.NewTabItem("Plasmid", u.buildPlasmidTab()),
+		container.NewTabItem("Chem Creator", u.buildChemCreatorTab()),
+	)
+
+	mainSplit := container.NewHSplit(left, container.NewHSplit(centerInner, rightTabs))
+	mainSplit.SetOffset(0.16)
+	main := container.NewBorder(top, bottom, nil, nil, mainSplit)
+	u.window.SetContent(main)
+}
+
+func (u *UI) startLoop() {
+	go func() {
+		for {
+			select {
+			case <-u.stopCh:
+				return
+			default:
+			}
+			if u.playing && time.Now().After(u.nextTick) {
+				fyne.Do(func() {
+					u.sim.Step()
+					u.render()
+				})
+				u.nextTick = time.Now().Add(u.speed)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+}
+
+func (u *UI) togglePlay() {
+	u.playing = !u.playing
+	if u.playing {
+		u.playBtn.SetText("Pause")
+		u.playBtn.SetIcon(theme.MediaPauseIcon())
+		u.nextTick = time.Now()
+	} else {
+		u.playBtn.SetText("Play")
+		u.playBtn.SetIcon(theme.MediaPlayIcon())
+	}
+}
+
+func (u *UI) step() {
+	u.sim.Step()
+	u.render()
+}
+
+func (u *UI) reset() {
+	u.sim = NewSim(u.sim.Params, time.Now().UnixNano())
+	u.selectedCell = -1
+	u.selectedGene = -1
+	u.render()
+}
+
+func (u *UI) getSelectedCell() *Cell {
+	if u.selectedCell < 0 {
+		return nil
+	}
+	for _, c := range u.sim.Cells {
+		if c.ID == u.selectedCell {
+			return c
+		}
+	}
+	return nil
+}
+
+func (u *UI) render() {
+	u.tickLabel.SetText(fmt.Sprintf("tick %d", u.sim.Tick))
+	u.aliveLabel.SetText(fmt.Sprintf("alive %d", u.sim.AliveCount()))
+	u.genLabel.SetText(fmt.Sprintf("gen %d", u.sim.MaxGen()))
+	u.envLabel.SetText(fmt.Sprintf("env %.1f", u.sim.EnvPool))
+	u.ahlLabel.SetText(fmt.Sprintf("AHL %.2f", u.sim.AHL))
+
+	u.sortedCache = u.sim.SortedCells()
+	u.cellList.Refresh()
+
+	if u.selectedCell < 0 && len(u.sortedCache) > 0 {
+		u.selectedCell = u.sortedCache[0].ID
+	}
+
+	u.renderGenome()
+	u.refreshSpecies()
+	u.refreshDetail()
+
+	u.seriesCv.Refresh()
+	if u.chemStressLabel != nil {
+		u.chemStressLabel.SetText(fmt.Sprintf("Total toxicity: %.2f | Nutrient x%.2f", u.sim.Chem.TotalToxicity(), u.sim.Chem.NutrientMultiplier()))
+	}
+	if u.lineageCv != nil { u.lineageCv.Refresh() }
+	if u.plasmidCv != nil { u.plasmidCv.Refresh() }
+	if u.plasmidLegend != nil { u.refreshPlasmidLegend() }
+	if u.phaseCv != nil { u.phaseCv.Refresh() }
+}
+
+func (u *UI) renderGenome() {
+	c := u.getSelectedCell()
+	u.genomeCanvas.Objects = nil
+	if c == nil {
+		u.genomeCanvas.Refresh()
+		return
+	}
+
+	// Gene annotations row
+	geneRow := container.NewHBox()
+	for gi, gene := range c.Genome.Genes {
+		g := gene
+		idx := gi
+		colorKey := color.RGBA{uint8(60 + (gi*60)%180), 100, 200, 200}
+		bar := canvas.NewRectangle(colorKey)
+		w := float32(gene.PromoterStart) * 12
+		bar.Move(fyne.NewPos(w, 0))
+		bar.Resize(fyne.NewSize(float32(gene.Length())*12, 18))
+		geneRow.Add(bar)
+
+		label := gene.Name
+		if gene.Disabled {
+			label = "⊘ " + gene.Name
+		}
+		btn := widget.NewButton(label, func() {
+			u.selectedGene = idx
+			u.renderGenome()
+		})
+		koBtn := widget.NewButton("KO", func() {
+			if c.Genome.Genes[idx].Knockdown > 0.5 { c.Genome.Genes[idx].Knockdown = 0 } else { c.Genome.Genes[idx].Knockdown = 1 }
+			u.renderGenome()
+			u.refreshSpecies()
+		})
+		koBtn.Importance = widget.DangerImportance
+		geneRow.Add(btn)
+		geneRow.Add(koBtn)
+		if gene.Operon != "" {
+			geneRow.Add(widget.NewLabelWithStyle("["+gene.Operon+"]", fyne.TextAlignLeading, fyne.TextStyle{Italic: true}))
+		}
+		_ = g
+	}
+
+	// Nucleotide row
+	nucRow := container.NewHBox()
+	for i, b := range c.Genome.DNA {
+		pos := i
+		base := b
+		cell := canvas.NewRectangle(nucleotideColors[base])
+		if u.selectedGene >= 0 && u.selectedGene < len(c.Genome.Genes) {
+			gene := c.Genome.Genes[u.selectedGene]
+			if pos >= gene.PromoterStart && pos < gene.CDSEnd {
+				cell.StrokeColor = color.White
+				cell.StrokeWidth = 2
+			}
+		}
+		cell.SetMinSize(fyne.NewSize(10, 20))
+		cellContainer := container.NewStack(cell)
+		bg := widget.NewButton("", func() {
+			// cycle nucleotide
+			cur := c.Genome.DNA[pos]
+			next := byte('A')
+			switch cur {
+			case 'A': next = 'T'
+			case 'T': next = 'G'
+			case 'G': next = 'C'
+			case 'C': next = 'A'
+			}
+			c.Genome.DNA[pos] = next
+			u.renderGenome()
+			u.refreshSpecies()
+		})
+		bg.Importance = widget.LowImportance
+		nucRow.Add(container.NewMax(cellContainer, bg))
+	}
+
+	u.genomeCanvas.Objects = []fyne.CanvasObject{
+		container.NewVBox(geneRow, nucRow),
+	}
+	u.genomeCanvas.Refresh()
+
+	u.dnaText.SetText(string(c.Genome.DNA))
+}
+
+func (u *UI) refreshSpecies() {
+	c := u.getSelectedCell()
+	if c == nil {
+		return
+	}
+
+	// mRNA list
+	mrnaNames := make([]string, 0, len(c.MRNA))
+	for k := range c.MRNA {
+		mrnaNames = append(mrnaNames, k)
+	}
+	sort.Strings(mrnaNames)
+	u.mrnaList.Length = func() int { return len(mrnaNames) }
+	u.mrnaList.CreateItem = func() fyne.CanvasObject { return mono("") }
+	u.mrnaList.UpdateItem = func(i widget.ListItemID, o fyne.CanvasObject) {
+		if i >= len(mrnaNames) {
+			return
+		}
+		name := mrnaNames[i]
+		count := c.MRNA[name]
+		// find gene to find length
+		var gene *Gene
+		for _, g := range c.Genome.Genes {
+			if g.Name == name {
+				gene = g
+				break
+			}
+		}
+		length := 0
+		if gene != nil {
+			length = gene.CDSEnd - gene.CDSStart
+		}
+		o.(*widget.Label).SetText(fmt.Sprintf("%-8s %.2f  (%dnt)", name, count, length))
+	}
+	u.mrnaList.Refresh()
+
+	// Protein list
+	protNames := make([]string, 0, len(c.Proteins))
+	for k := range c.Proteins {
+		protNames = append(protNames, k)
+	}
+	sort.Strings(protNames)
+	u.proteinList.Length = func() int { return len(protNames) }
+	u.proteinList.CreateItem = func() fyne.CanvasObject { return mono("") }
+	u.proteinList.UpdateItem = func(i widget.ListItemID, o fyne.CanvasObject) {
+		if i >= len(protNames) {
+			return
+		}
+		name := protNames[i]
+		count := c.Proteins[name]
+		role := "?"
+		if name == "MetA_enzyme" {
+			role = "enzyme"
+		} else if name == "RegA_TF" || name == "RegB_TF" {
+			role = "transcription factor"
+		}
+		o.(*widget.Label).SetText(fmt.Sprintf("%-14s %6.2f  [%s]", name, count, role))
+	}
+	u.proteinList.Refresh()
+}
+
+func (u *UI) refreshDetail() {
+	c := u.getSelectedCell()
+	if c == nil {
+		u.detailBox.Objects = []fyne.CanvasObject{
+			widget.NewLabelWithStyle("— select a cell —", fyne.TextAlignLeading, fyne.TextStyle{Italic: true}),
+		}
+		u.detailBox.Refresh()
+		return
+	}
+	status := "ALIVE"
+	if !c.Alive {
+		status = "DEAD: " + c.DeathCause
+	}
+	steadyText := "DYNAMIC"
+	if u.sim.Steady {
+		steadyText = fmt.Sprintf("STEADY (%d ticks stable)", u.sim.SteadyTicks)
+	}
+	u.detailBox.Objects = []fyne.CanvasObject{
+		widget.NewLabelWithStyle(fmt.Sprintf("Cell #%d", c.ID), fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		mono(fmt.Sprintf("status:    %s", status)),
+		mono(fmt.Sprintf("equilib:   %s", steadyText)),
+		mono(fmt.Sprintf("gen:       %d", c.Generation)),
+		mono(fmt.Sprintf("age:       %d", c.Age)),
+		mono(fmt.Sprintf("ATP:       %.2f", c.ATP)),
+		mono(fmt.Sprintf("glucose:   %.2f", c.Glucose)),
+		mono(fmt.Sprintf("divisions: %d", c.Divisions)),
+		mono(fmt.Sprintf("total ATP: %.1f", c.TotalATPProduced)),
+		mono(fmt.Sprintf("genes:     %d", len(c.Genome.Genes))),
+		mono(fmt.Sprintf("mRNA:      %d species", len(c.MRNA))),
+		mono(fmt.Sprintf("proteins:  %d species", len(c.Proteins))),
+	}
+	u.detailBox.Refresh()
+}
+
+// Additional helper referenced by canvas.NewRasterWithPixels
+func (u *UI) seriesPixels(x, y, w, h int) color.Color {
+	return color.RGBA{0, 0, 0, 255}
+}
+
+
+func (u *UI) refreshPathwayBox() {
+	c := u.getSelectedCell()
+	if c == nil || u.pathwayBox == nil {
+		return
+	}
+	var objs []fyne.CanvasObject
+	for i, step := range c.Genome.Pathways {
+		idx := i
+		objs = append(objs, container.NewHBox(
+			mono(fmt.Sprintf("%s --[%s]--> %s", step.Substrate, step.Enzyme, step.Product)),
+			widget.NewButton("×", func() {
+				c.Genome.Pathways = append(c.Genome.Pathways[:idx], c.Genome.Pathways[idx+1:]...)
+				u.refreshPathwayBox()
+			}),
+		))
+	}
+	if len(objs) == 0 {
+		objs = append(objs, mono("(no pathway steps)"))
+	}
+	u.pathwayBox.Objects = objs
+	u.pathwayBox.Refresh()
+}
+
+func (u *UI) showAddPathDialog() {
+	c := u.getSelectedCell()
+	if c == nil {
+		return
+	}
+	enzIn := widget.NewEntry()
+	enzIn.SetPlaceHolder("Enzyme protein (e.g. MetA_enzyme)")
+	subIn := widget.NewEntry()
+	subIn.SetPlaceHolder("Substrate (metabolite or protein)")
+	prodIn := widget.NewEntry()
+	prodIn.SetPlaceHolder("Product")
+	kcatIn := widget.NewEntry()
+	kcatIn.SetText("0.5")
+	kmIn := widget.NewEntry()
+	kmIn.SetText("5.0")
+
+	dialog.ShowForm("Add Pathway Step", "Add", "Cancel", []*widget.FormItem{
+		{Text: "Enzyme", Widget: enzIn},
+		{Text: "Substrate", Widget: subIn},
+		{Text: "Product", Widget: prodIn},
+		{Text: "kcat", Widget: kcatIn},
+		{Text: "Km", Widget: kmIn},
+	}, func(ok bool) {
+		if !ok {
+			return
+		}
+		if enzIn.Text == "" || subIn.Text == "" || prodIn.Text == "" {
+			return
+		}
+		var kcat, km float64
+		fmt.Sscanf(kcatIn.Text, "%f", &kcat)
+		fmt.Sscanf(kmIn.Text, "%f", &km)
+		if kcat <= 0 {
+			kcat = 0.5
+		}
+		if km <= 0 {
+			km = 5.0
+		}
+		c.Genome.Pathways = append(c.Genome.Pathways, PathwayStep{
+			Enzyme:    enzIn.Text,
+			Substrate: subIn.Text,
+			Product:   prodIn.Text,
+			Kcat:      kcat,
+			Km:        km,
+		})
+		u.refreshPathwayBox()
+	}, u.window)
+}
+
+
+func (u *UI) setupMenu() {
+	file := fyne.NewMenu("File",
+		fyne.NewMenuItem("Save Project…", u.saveProject),
+		fyne.NewMenuItem("Load Project…", u.loadProject),
+		fyne.NewMenuItemSeparator(),
+		fyne.NewMenuItem("Export .txt", u.exportTXT),
+		fyne.NewMenuItem("Export .pdf", u.exportPDF),
+		fyne.NewMenuItem("Export CSV", u.exportCSV),
+		fyne.NewMenuItem("Export SBML", u.exportSBML),
+		fyne.NewMenuItem("Export SBOL", u.exportSBOL),
+		fyne.NewMenuItemSeparator(),
+		fyne.NewMenuItem("Quit", func() {
+			fyne.CurrentApp().Quit()
+		}),
+	)
+	sim := fyne.NewMenu("Simulate",
+		fyne.NewMenuItem("Play / Pause", u.togglePlay),
+		fyne.NewMenuItem("Step", u.step),
+		fyne.NewMenuItem("Reset", u.reset),
+		fyne.NewMenuItemSeparator(),
+		fyne.NewMenuItem("Parameter Sweep…", u.showSweepDialog),
+	)
+	u.window.SetMainMenu(fyne.NewMainMenu(file, sim))
+}
+
+
+func (u *UI) rebuildChemBox(query string) {
+	if u.chemBox == nil {
+		return
+	}
+	q := strings.ToLower(strings.TrimSpace(query))
+	u.chemBox.Objects = nil
+
+	lastCat := ""
+	count := 0
+	for _, sp := range ChemSpeciesTable {
+		if q != "" {
+			if !strings.Contains(strings.ToLower(sp.Name), q) &&
+				!strings.Contains(strings.ToLower(sp.Formula), q) &&
+				!strings.Contains(strings.ToLower(sp.Category), q) &&
+				!strings.Contains(strings.ToLower(sp.Class), q) {
+				continue
+			}
+		}
+		count++
+		if sp.Category != lastCat {
+			if lastCat != "" {
+				u.chemBox.Add(widget.NewSeparator())
+			}
+			u.chemBox.Add(widget.NewLabelWithStyle(sp.Category, fyne.TextAlignLeading, fyne.TextStyle{Bold: true}))
+			lastCat = sp.Category
+		}
+
+		slider := widget.NewSlider(0, 10)
+		slider.Step = 0.1
+		slider.Value = u.sim.Chem.Concentrations[sp.Formula]
+		valLabel := mono(fmt.Sprintf("%.1f", slider.Value))
+		formula := sp.Formula
+		lbl := valLabel
+		slider.OnChanged = func(v float64) {
+			u.sim.Chem.Concentrations[formula] = v
+			lbl.SetText(fmt.Sprintf("%.1f", v))
+		}
+		u.chemSliders[sp.Formula] = slider
+		u.chemVals[sp.Formula] = valLabel
+
+		hbox := container.NewHBox(
+			widget.NewLabel(fmt.Sprintf("%s (%s)", sp.Name, sp.Formula)),
+			slider, valLabel,
+		)
+		if sp.pH != 0 {
+			hbox.Add(widget.NewLabelWithStyle(fmt.Sprintf("pH %.1f", sp.pH),
+				fyne.TextAlignTrailing, fyne.TextStyle{Italic: true}))
+		}
+		u.chemBox.Add(hbox)
+	}
+
+	if q != "" && count == 0 {
+		u.chemBox.Add(widget.NewLabelWithStyle("(no matches)", fyne.TextAlignLeading, fyne.TextStyle{Italic: true}))
+	}
+
+	u.chemBox.Add(widget.NewSeparator())
+	if q != "" {
+		u.chemBox.Add(mono(fmt.Sprintf("%d / %d shown", count, len(ChemSpeciesTable))))
+	}
+	if u.chemStressLabel != nil {
+		u.chemBox.Add(u.chemStressLabel)
+	}
+	u.chemBox.Refresh()
+}

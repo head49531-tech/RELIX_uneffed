@@ -1,0 +1,102 @@
+package main
+
+import (
+	"math"
+)
+
+type Cell struct {
+	ID         int
+	ParentID   int
+	Generation int
+	Age        int
+	Alive      bool
+	DeathCause string
+
+	Genome *Genome
+
+	// mRNA per gene name
+	MRNA map[string]float64
+	// Protein counts per protein name
+	Proteins map[string]float64
+	// Nutrients
+	Glucose float64
+	ATP     float64
+
+	// Cumulative counters
+	TotalATPProduced float64
+	Divisions        int
+}
+
+// hill is the Hill function: level^n / (K^n + level^n)
+func hill(level, K, n float64) float64 {
+	if level <= 0 {
+		return 0
+	}
+	ln := math.Pow(level, n)
+	return ln / (math.Pow(K, n) + ln)
+}
+
+// PromoterOccupancy: fraction 0..1 of promoter bound by activators/repressors
+func (c *Cell) PromoterOccupancy(gene *Gene, sim *Sim) float64 {
+	act := 1.0
+	for _, tf := range gene.Activators {
+		act *= (1 + hill(c.Proteins[tf], gene.ActivationK, gene.HillN))
+	}
+	rep := 1.0
+	for _, tf := range gene.Repressors {
+		rep *= (1 - 0.9*hill(c.Proteins[tf], gene.RepressionK, gene.HillN))
+	}
+	// Inducer molecules (small-molecule inputs)
+	for i, indName := range gene.Inducers {
+		conc := sim.Inducers[indName]
+		k := 1.0
+		if i < len(gene.InducerKs) { k = gene.InducerKs[i] }
+		h := hill(conc, k, 2.0)
+		if i < len(gene.InducerModes) && gene.InducerModes[i] == "repress" {
+			rep *= (1 - 0.9*h)
+		} else {
+			act *= (1 + h)
+		}
+	}
+	// Quorum sensing via global AHL
+	if gene.QuorumReg {
+		k := gene.QuorumK
+		if k <= 0 { k = 5.0 }
+		h := hill(sim.AHL, k, 2.0)
+		if gene.QuorumMode == "repress" {
+			rep *= (1 - 0.9*h)
+		} else {
+			act *= (1 + h)
+		}
+	}
+	return act * rep
+}
+
+func (c *Cell) CloneDaughter(id int, rng interface{ Intn(int) int }) *Cell {
+	d := &Cell{
+		ID:         id,
+		ParentID:   c.ID,
+		Generation: c.Generation + 1,
+		Alive:      true,
+		Genome:     c.Genome.Clone(),
+		MRNA:       map[string]float64{},
+		Proteins:   map[string]float64{},
+		Glucose:    c.Glucose / 2,
+		ATP:        c.ATP / 2,
+	}
+	for k, v := range c.MRNA {
+		d.MRNA[k] = v / 2
+	}
+	for k, v := range c.Proteins {
+		d.Proteins[k] = v / 2
+	}
+	c.Glucose /= 2
+	c.ATP /= 2
+	for k := range c.MRNA {
+		c.MRNA[k] /= 2
+	}
+	for k := range c.Proteins {
+		c.Proteins[k] /= 2
+	}
+	return d
+}

@@ -1,0 +1,217 @@
+package main
+
+import (
+	"fmt"
+	"math/rand"
+	"strings"
+)
+
+const Nucleotides = "ATGC"
+
+type Gene struct {
+	Name          string
+	PromoterStart int
+	PromoterEnd   int
+	RBSStart      int
+	RBSEnd        int
+	CDSStart      int
+	CDSEnd        int
+
+	Product    string
+	Activators []string
+	Repressors []string
+
+	BasalTranscription float64
+	ActivationK        float64
+	RepressionK        float64
+	HillN              float64
+}
+
+func (g *Gene) Length() int { return g.CDSEnd - g.PromoterStart }
+
+type Genome struct {
+	DNA   []byte
+	Genes []*Gene
+}
+
+func NewGenome() *Genome {
+	g := &Genome{}
+	// Gene 1: metA — metabolic enzyme that converts glucose → ATP
+	g.addGene(&Gene{
+		Name: "metA", Product: "MetA_enzyme",
+		Activators: []string{"RegA_TF"},
+		Repressors: []string{"RegB_TF"},
+		BasalTranscription: 0.02,
+		ActivationK: 20.0, RepressionK: 20.0, HillN: 2.0,
+	}, "AAAAAAAAAAAAAAAAAAAA", "GGGAGGAGG", "ATGCGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGC")
+	// Gene 2: regA — TF that activates metA (positive feedback)
+	g.addGene(&Gene{
+		Name: "regA", Product: "RegA_TF",
+		Activators: []string{"RegA_TF"},
+		Repressors: []string{},
+		BasalTranscription: 0.05,
+		ActivationK: 20.0, RepressionK: 20.0, HillN: 2.0,
+	}, "TTTTTTTTTTTTTTTTTTTT", "GGGAGGAGG", "ATGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGC")
+	// Gene 3: regB — TF that represses metA (delays runaway)
+	g.addGene(&Gene{
+		Name: "regB", Product: "RegB_TF",
+		Activators: []string{"MetA_enzyme"},
+		Repressors: []string{},
+		BasalTranscription: 0.01,
+		ActivationK: 30.0, RepressionK: 30.0, HillN: 2.0,
+	}, "CCCCCCCCCCCCCCCCCCCC", "GGGAGGAGG", "ATGCGTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAG")
+	return g
+}
+
+func (g *Genome) addGene(gene *Gene, promoter, rbs, cds string) {
+	gene.PromoterStart = len(g.DNA)
+	g.DNA = append(g.DNA, []byte(promoter)...)
+	gene.PromoterEnd = len(g.DNA)
+
+	gene.RBSStart = len(g.DNA)
+	g.DNA = append(g.DNA, []byte(rbs)...)
+	gene.RBSEnd = len(g.DNA)
+
+	gene.CDSStart = len(g.DNA)
+	g.DNA = append(g.DNA, []byte(cds)...)
+	gene.CDSEnd = len(g.DNA)
+
+	g.Genes = append(g.Genes, gene)
+}
+
+func (g *Genome) Clone() *Genome {
+	ng := &Genome{
+		DNA: append([]byte{}, g.DNA...),
+	}
+	for _, gene := range g.Genes {
+		c := *gene
+		c.Activators = append([]string{}, gene.Activators...)
+		c.Repressors = append([]string{}, gene.Repressors...)
+		ng.Genes = append(ng.Genes, &c)
+	}
+	return ng
+}
+
+// RBSStrength: fraction of G's in the RBS sequence
+func (g *Genome) RBSStrength(gene *Gene) float64 {
+	if gene.RBSEnd <= gene.RBSStart {
+		return 0
+	}
+	s := g.DNA[gene.RBSStart:gene.RBSEnd]
+	if len(s) == 0 {
+		return 0
+	}
+	gc := 0
+	for _, b := range s {
+		if b == 'G' {
+			gc++
+		}
+	}
+	return float64(gc) / float64(len(s))
+}
+
+// mutate applies one of: point, insertion, deletion at random position
+func (g *Genome) mutate(rng *rand.Rand) (string, int) {
+	if len(g.DNA) == 0 {
+		return "none", -1
+	}
+	pos := rng.Intn(len(g.DNA))
+	switch rng.Intn(3) {
+	case 0: // point mutation
+		_ = g.DNA[pos]
+		g.DNA[pos] = Nucleotides[rng.Intn(4)]
+		return "point", pos
+	case 1: // deletion
+		g.DNA = append(g.DNA[:pos], g.DNA[pos+1:]...)
+		g.shiftGenes(pos, -1)
+		return "deletion", pos
+	case 2: // insertion
+		newBase := Nucleotides[rng.Intn(4)]
+		g.DNA = append(g.DNA, 0)
+		copy(g.DNA[pos+1:], g.DNA[pos:])
+		g.DNA[pos] = newBase
+		g.shiftGenes(pos, 1)
+		return "insertion", pos
+	}
+	return "none", -1
+}
+
+func (g *Genome) shiftGenes(pos, delta int) {
+	for _, gene := range g.Genes {
+		if gene.PromoterStart >= pos { gene.PromoterStart += delta }
+		if gene.PromoterEnd > pos { gene.PromoterEnd += delta }
+		if gene.RBSStart >= pos { gene.RBSStart += delta }
+		if gene.RBSEnd > pos { gene.RBSEnd += delta }
+		if gene.CDSStart >= pos { gene.CDSStart += delta }
+		if gene.CDSEnd > pos { gene.CDSEnd += delta }
+	}
+	// Clamp
+	for _, gene := range g.Genes {
+		if gene.PromoterStart < 0 { gene.PromoterStart = 0 }
+		if gene.PromoterEnd > len(g.DNA) { gene.PromoterEnd = len(g.DNA) }
+		if gene.RBSStart < 0 { gene.RBSStart = 0 }
+		if gene.RBSEnd > len(g.DNA) { gene.RBSEnd = len(g.DNA) }
+		if gene.CDSStart < 0 { gene.CDSStart = 0 }
+		if gene.CDSEnd > len(g.DNA) { gene.CDSEnd = len(g.DNA) }
+	}
+	// Drop corrupted genes
+	var alive []*Gene
+	for _, gene := range g.Genes {
+		if gene.PromoterEnd > gene.PromoterStart &&
+			gene.RBSEnd > gene.RBSStart &&
+			gene.CDSEnd > gene.CDSStart &&
+			gene.CDSEnd <= len(g.DNA) {
+			alive = append(alive, gene)
+		}
+	}
+	g.Genes = alive
+}
+
+// codon: 3 nucleotides → amino acid (simplified, just hash to a letter)
+func codonOf(dna []byte) byte {
+	if len(dna) < 3 { return '?' }
+	h := int(dna[0])*31 + int(dna[1])*7 + int(dna[2])
+	return byte('A' + h%20)
+}
+
+// TranslateCDS: stop codon is TAA/TAG/TGA
+func (g *Genome) TranslateCDS(gene *Gene) string {
+	if gene.CDSEnd > len(g.DNA) || gene.CDSEnd-gene.CDSStart < 3 {
+		return ""
+	}
+	var sb strings.Builder
+	for i := gene.CDSStart; i+2 < gene.CDSEnd; i += 3 {
+		codon := g.DNA[i : i+3]
+		if codon[0] == 'T' && codon[1] == 'A' && (codon[2] == 'A' || codon[2] == 'G') {
+			break
+		}
+		if codon[0] == 'T' && codon[1] == 'G' && codon[2] == 'A' {
+			break
+		}
+		sb.WriteByte(codonOf(codon))
+	}
+	return sb.String()
+}
+
+func (g *Genome) String() string {
+	var sb strings.Builder
+	for i, b := range g.DNA {
+		for _, gene := range g.Genes {
+			if i == gene.PromoterStart {
+				sb.WriteString(fmt.Sprintf("\n[%s|prom] ", gene.Name))
+			}
+			if i == gene.RBSStart {
+				sb.WriteString("|rbs|")
+			}
+			if i == gene.CDSStart {
+				sb.WriteString("|cds|")
+			}
+			if i == gene.CDSEnd {
+				sb.WriteString(" [end]\n")
+			}
+		}
+		sb.WriteByte(b)
+	}
+	sb.WriteString("\n")
+	return sb.String()
+}

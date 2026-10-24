@@ -1,0 +1,438 @@
+package main
+
+import (
+	"math"
+	"math/rand"
+	"sort"
+)
+
+type SimParams struct {
+	MutationRate       float64
+	BaseDeathRate      float64
+	DivisionATP        float64
+	MaxCells           int
+	TranslationK       float64
+	MRNADegradation    float64
+	ProteinDegradation float64
+	EnzymeKcat         float64
+	GlucoseInflux      float64
+	ATPBasal           float64
+	EnvGlucose         float64
+}
+
+func DefaultParams() SimParams {
+	return SimParams{
+		MutationRate:       0.05,
+		BaseDeathRate:      0.002,
+		DivisionATP:        10.0,
+		MaxCells:           300,
+		TranslationK:       1.5,
+		MRNADegradation:    0.15,
+		ProteinDegradation: 0.01,
+		EnzymeKcat:         0.5,
+		GlucoseInflux:      1.0,
+		ATPBasal:           0.1,
+		EnvGlucose:         50.0,
+	}
+}
+
+type Sim struct {
+	Tick           int
+	Cells          []*Cell
+	NextID         int
+	Params         SimParams
+	Rng            *rand.Rand
+	EnvPool        float64
+	History        []HistoryPoint
+	SpeciesHistory []SpeciesPoint
+	Steady         bool
+	SteadyTicks    int
+
+	Inducers   map[string]float64
+	AHL        float64
+	Stochastic bool
+	Chem       *Chemex
+}
+
+type HistoryPoint struct {
+	Tick    int
+	Alive   int
+	ATP     float64
+	Glucose float64
+}
+
+type SpeciesPoint struct {
+	Tick         int
+	Alive        int
+	TotalATP     float64
+	TotalGlucose float64
+	EnvGlucose   float64
+	MRNA         map[string]float64
+	Proteins     map[string]float64
+}
+
+func NewSim(p SimParams, seed int64) *Sim {
+	s := &Sim{
+		Params:   p,
+		NextID:   1,
+		Rng:      rand.New(rand.NewSource(seed)),
+		EnvPool:  p.EnvGlucose * 100,
+		Inducers: map[string]float64{"IPTG": 0, "aTc": 0, "Arabinose": 0},
+		Chem:     NewChemex(),
+	}
+	for i := 0; i < 3; i++ {
+		s.Cells = append(s.Cells, s.newCell(0))
+	}
+	return s
+}
+
+func (s *Sim) newCell(parent int) *Cell {
+	c := &Cell{
+		ID:         s.NextID,
+		ParentID:   parent,
+		Generation: 0,
+		Alive:      true,
+		Genome:     NewGenome(),
+		MRNA:       map[string]float64{},
+		Proteins:   map[string]float64{},
+		Metabolites: map[string]float64{},
+		Glucose:    10,
+		ATP:        5,
+	}
+	s.NextID++
+	return c
+}
+
+func poissonSample(rng *rand.Rand, lambda float64) float64 {
+	if lambda <= 0 {
+		return 0
+	}
+	if lambda < 30 {
+		L := math.Exp(-lambda)
+		k := 0.0
+		p := 1.0
+		for {
+			k++
+			p *= rng.Float64()
+			if p <= L || k > 500 {
+				break
+			}
+		}
+		return k - 1
+	}
+	v := math.Round(rng.NormFloat64()*math.Sqrt(lambda) + lambda)
+	if v < 0 {
+		v = 0
+	}
+	return v
+}
+
+func (s *Sim) Step() {
+	p := s.Params
+
+	// AHL update: dilution + production by LuxI-positive cells
+	s.AHL *= 0.95
+	for _, c := range s.Cells {
+		if !c.Alive {
+			continue
+		}
+		for _, gene := range c.Genome.Genes {
+			if gene.ProducesAHL {
+				s.AHL += gene.AHLRate * c.Proteins[gene.Product]
+			}
+		}
+	}
+
+	for _, c := range s.Cells {
+		if !c.Alive {
+			continue
+		}
+		c.Age++
+
+		imported := math.Min(c.GlucoseMax(), p.GlucoseInflux)
+		if s.EnvPool >= imported {
+			s.EnvPool -= imported
+			c.Glucose += imported
+		} else {
+			c.Glucose += s.EnvPool
+			s.EnvPool = 0
+		}
+
+		// Operon sharing: genes in same operon inherit strongest promoter activity
+		operonAct := map[string]float64{}
+		for _, gene := range c.Genome.Genes {
+			if gene.Operon == "" || gene.Disabled || gene.Knockdown >= 1.0 {
+				continue
+			}
+			if _, ok := operonAct[gene.Operon]; ok {
+				continue
+			}
+			best := 0.0
+			for _, g2 := range c.Genome.Genes {
+				if g2.Operon == gene.Operon && !g2.Disabled && g2.Knockdown < 1.0 {
+					occ := c.PromoterOccupancy(g2, s)
+					if occ > best {
+						best = occ
+					}
+				}
+			}
+			operonAct[gene.Operon] = best
+		}
+
+		// Transcription (operon sharing + CRISPRi knockdown)
+		for _, gene := range c.Genome.Genes {
+			if gene.Disabled || gene.Knockdown >= 1.0 {
+				continue
+			}
+			var occ float64
+			if gene.Operon != "" {
+				occ = operonAct[gene.Operon]
+			} else {
+				occ = c.PromoterOccupancy(gene, s)
+			}
+			rate := gene.BasalTranscription * occ
+			if gene.Knockdown > 0 {
+				rate *= (1 - gene.Knockdown)
+			}
+			if s.Stochastic {
+				rate = poissonSample(s.Rng, rate)
+			}
+			c.MRNA[gene.Name] += rate
+		}
+
+		for _, gene := range c.Genome.Genes {
+			mrna := c.MRNA[gene.Name]
+			if mrna <= 0 {
+				continue
+			}
+			rbs := c.Genome.RBSStrength(gene)
+			rate := p.TranslationK * mrna * rbs
+			if s.Stochastic {
+				rate = poissonSample(s.Rng, rate)
+			}
+			c.Proteins[gene.Product] += rate
+			c.MRNA[gene.Name] = math.Max(0, mrna-rate*0.1)
+		}
+
+		for name, v := range c.MRNA {
+			nv := v - v*p.MRNADegradation
+			if nv < 0.01 {
+				delete(c.MRNA, name)
+			} else {
+				c.MRNA[name] = nv
+			}
+		}
+
+		for name, v := range c.Proteins {
+			nv := v - v*p.ProteinDegradation
+			if nv < 0.01 {
+				delete(c.Proteins, name)
+			} else {
+				c.Proteins[name] = nv
+			}
+		}
+
+		enzyme := c.Proteins["MetA_enzyme"]
+		if enzyme > 0 && c.Glucose > 0 {
+			km := 5.0
+			rate := p.EnzymeKcat * enzyme * (c.Glucose / (km + c.Glucose))
+			if rate > c.Glucose {
+				rate = c.Glucose
+			}
+			c.Glucose -= rate
+			c.ATP += rate * s.Chem.NutrientMultiplier()
+			c.TotalATPProduced += rate * s.Chem.NutrientMultiplier()
+		}
+
+		// Metabolic pathways: enzyme-mediated substrate -> product
+		if c.Metabolites == nil {
+			c.Metabolites = map[string]float64{}
+		}
+		for _, step := range c.Genome.Pathways {
+			enz := c.Proteins[step.Enzyme]
+			sub := c.Metabolites[step.Substrate]
+			if sub == 0 {
+				sub = c.Proteins[step.Substrate]
+			}
+			if enz > 0 && sub > 0 {
+				km := step.Km
+				if km <= 0 {
+					km = 5.0
+				}
+				kcat := step.Kcat
+				if kcat <= 0 {
+					kcat = 0.5
+				}
+				r := kcat * enz * sub / (km + sub)
+				if r > sub {
+					r = sub
+				}
+				c.Metabolites[step.Substrate] = sub - r
+				c.Metabolites[step.Product] = c.Metabolites[step.Product] + r
+			}
+		}
+
+		c.ATP -= p.ATPBasal
+		if c.ATP < 0 {
+			c.ATP = 0
+		}
+
+		if c.ATP < 0.1 && c.Glucose < 0.1 {
+			c.Alive = false
+			c.DeathCause = "starvation"
+			continue
+		}
+		deathProb := p.BaseDeathRate + s.Chem.TotalToxicity()*0.02
+			if s.Rng.Float64() < deathProb {
+			c.Alive = false
+			c.DeathCause = "stochastic"
+			continue
+		}
+	}
+
+	var newborns []*Cell
+	aliveCount := s.aliveCount()
+	for _, c := range s.Cells {
+		if !c.Alive {
+			continue
+		}
+		if c.ATP >= p.DivisionATP && aliveCount+len(newborns) < p.MaxCells {
+			daughter := c.CloneDaughter(s.NextID, s.Rng)
+			s.NextID++
+			c.Divisions++
+			if s.Rng.Float64() < p.MutationRate + s.Chem.TotalRadiation()*0.01 {
+				daughter.Genome.mutate(s.Rng)
+			}
+			c.ATP -= p.DivisionATP / 2
+			daughter.ATP -= p.DivisionATP / 2
+			if c.ATP < 0 { c.ATP = 0 }
+			if daughter.ATP < 0 { daughter.ATP = 0 }
+			newborns = append(newborns, daughter)
+		}
+	}
+	s.Cells = append(s.Cells, newborns...)
+	s.Tick++
+
+	totalATP, totalGlucose, alive := 0.0, 0.0, 0
+	for _, c := range s.Cells {
+		if c.Alive {
+			alive++
+			totalATP += c.ATP
+			totalGlucose += c.Glucose
+		}
+	}
+	s.History = append(s.History, HistoryPoint{Tick: s.Tick, Alive: alive, ATP: totalATP, Glucose: totalGlucose})
+	if len(s.History) > 500 {
+		s.History = s.History[len(s.History)-500:]
+	}
+
+	s.SpeciesHistory = append(s.SpeciesHistory, SpeciesPoint{
+		Tick: s.Tick, Alive: alive, TotalATP: totalATP, TotalGlucose: totalGlucose,
+		EnvGlucose: s.EnvPool,
+		MRNA:       s.GlobalMRNALevels(),
+		Proteins:   s.GlobalProteinLevels(),
+	})
+	if len(s.SpeciesHistory) > 2000 {
+		s.SpeciesHistory = s.SpeciesHistory[len(s.SpeciesHistory)-2000:]
+	}
+
+	s.updateSteadyState()
+}
+
+func (c *Cell) GlucoseMax() float64 { return 20.0 }
+
+func (s *Sim) aliveCount() int {
+	n := 0
+	for _, c := range s.Cells {
+		if c.Alive {
+			n++
+		}
+	}
+	return n
+}
+
+func (s *Sim) AliveCount() int { return s.aliveCount() }
+
+func (s *Sim) MaxGen() int {
+	m := 0
+	for _, c := range s.Cells {
+		if c.Generation > m {
+			m = c.Generation
+		}
+	}
+	return m
+}
+
+func (s *Sim) SortedCells() []*Cell {
+	out := make([]*Cell, len(s.Cells))
+	copy(out, s.Cells)
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Alive != out[j].Alive {
+			return out[i].Alive
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out
+}
+
+func (s *Sim) GlobalProteinLevels() map[string]float64 {
+	out := map[string]float64{}
+	for _, c := range s.Cells {
+		if !c.Alive {
+			continue
+		}
+		for k, v := range c.Proteins {
+			out[k] += v
+		}
+	}
+	return out
+}
+
+func (s *Sim) GlobalMRNALevels() map[string]float64 {
+	out := map[string]float64{}
+	for _, c := range s.Cells {
+		if !c.Alive {
+			continue
+		}
+		for k, v := range c.MRNA {
+			out[k] += v
+		}
+	}
+	return out
+}
+
+func (s *Sim) updateSteadyState() {
+	const window = 30
+	if len(s.History) < window {
+		s.Steady = false
+		s.SteadyTicks = 0
+		return
+	}
+	aliveSlice := make([]float64, window)
+	atpSlice := make([]float64, window)
+	for i := 0; i < window; i++ {
+		h := s.History[len(s.History)-window+i]
+		aliveSlice[i] = float64(h.Alive)
+		atpSlice[i] = h.ATP
+	}
+	if relativeVariance(aliveSlice) < 0.02 && relativeVariance(atpSlice) < 0.02 {
+		s.SteadyTicks++
+	} else {
+		s.SteadyTicks = 0
+	}
+	s.Steady = s.SteadyTicks >= 10
+}
+
+func relativeVariance(xs []float64) float64 {
+	if len(xs) == 0 { return 0 }
+	mean := 0.0
+	for _, x := range xs { mean += x }
+	mean /= float64(len(xs))
+	if mean == 0 { return 1.0 }
+	max, min := xs[0], xs[0]
+	for _, x := range xs {
+		if x > max { max = x }
+		if x < min { min = x }
+	}
+	return (max - min) / mean
+}
