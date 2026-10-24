@@ -1,0 +1,174 @@
+package main
+
+type ChemSpecies struct {
+	Category    string
+	Name        string
+	Formula     string
+	Toxicity    float64
+	Nutrient    float64
+	Oxidant     float64
+	Radiation   float64
+	Description string
+}
+
+var ChemSpeciesTable = []ChemSpecies{
+	// -------- Water & ROS --------
+	{"Water & ROS", "Water",             "H2O",   0.0, 1.0, 0.0, 0.0, "Neutral; mild nutrient"},
+	{"Water & ROS", "Deuterium oxide",   "D2O",   0.3, 0.5, 0.0, 0.0, "Heavy water; slows kinetics"},
+	{"Water & ROS", "Hydrogen peroxide", "H2O2",  0.3, 0.0, 0.8, 0.0, "Oxidant; toxic above 1mM"},
+	{"Water & ROS", "Hydroxyl radical",  "OH*",   0.9, 0.0, 1.0, 0.0, "Highly reactive ROS"},
+	{"Water & ROS", "Superoxide",        "O2-",   0.4, 0.0, 0.9, 0.0, "ROS"},
+
+	// -------- Gases --------
+	{"Gases", "Hydrogen gas",      "H2",   0.0, 0.3, 0.0, 0.0, "Electron donor"},
+	{"Gases", "Oxygen",            "O2",   0.0, 0.8, 0.0, 0.0, "Terminal electron acceptor"},
+	{"Gases", "Ozone",             "O3",   0.6, 0.0, 0.9, 0.0, "Strong oxidant"},
+	{"Gases", "Chlorine gas",      "Cl2",  0.9, 0.0, 0.7, 0.0, "WWI chemical weapon"},
+	{"Gases", "Nitric oxide",      "NO",   0.3, 0.0, 0.5, 0.1, "Signaling; ROS-like"},
+	{"Gases", "Sulfur dioxide",    "SO2",  0.4, 0.0, 0.4, 0.0, "Irritant"},
+	{"Gases", "Hydrogen sulfide",  "H2S",  0.5, 0.0, 0.3, 0.0, "Signaling at low conc"},
+	{"Gases", "Ammonia",           "NH3",  0.4, 0.5, 0.0, 0.0, "Nitrogen source"},
+
+	// -------- Acids --------
+	{"Acids", "Proton",           "H+",    0.1, 0.0, 0.2, 0.0, "pH effect"},
+	{"Acids", "Hydrochloric acid","HCl",   0.6, 0.0, 0.1, 0.0, "Strong acid"},
+	{"Acids", "Sulfuric acid",    "H2SO4", 0.7, 0.0, 0.1, 0.0, "Strong acid"},
+	{"Acids", "Nitric acid",      "HNO3",  0.7, 0.0, 0.3, 0.0, "Oxidizing acid"},
+	{"Acids", "Phosphoric acid",  "H3PO4", 0.5, 0.0, 0.1, 0.0, "Weak acid"},
+	{"Acids", "Acetic acid",      "AcOH",  0.3, 0.2, 0.1, 0.0, "Weak acid; carbon source"},
+	{"Acids", "Lactic acid",      "LacH",  0.2, 0.3, 0.1, 0.0, "Fermentation product"},
+	{"Acids", "Citric acid",      "CitH",  0.2, 0.3, 0.1, 0.0, "TCA cycle intermediate"},
+
+	// -------- Chlorine & Halogens --------
+	{"Chlorine & Halogens", "Hypochlorous acid",   "HOCl",  0.5, 0.0, 0.9, 0.0, "Bleach; oxidant"},
+	{"Chlorine & Halogens", "Sodium hypochlorite", "NaClO", 0.4, 0.0, 0.8, 0.0, "Household bleach"},
+	{"Chlorine & Halogens", "Chlorine dioxide",    "ClO2",  0.6, 0.0, 1.0, 0.0, "Industrial oxidant"},
+	{"Chlorine & Halogens", "Chloride ion",        "Cl-",   0.0, 0.4, 0.0, 0.0, "Essential anion"},
+	{"Chlorine & Halogens", "Fluoride ion",        "F-",    0.4, 0.0, 0.0, 0.0, "Enolase inhibitor"},
+	{"Chlorine & Halogens", "Bromide ion",         "Br-",   0.1, 0.1, 0.0, 0.0, "Trace nutrient"},
+	{"Chlorine & Halogens", "Iodide ion",          "I-",    0.0, 0.2, 0.0, 0.0, "Thyroid precursor"},
+
+	// -------- Sulfur --------
+	{"Sulfur", "Elemental sulfur", "S8",   0.0, 0.0, 0.0, 0.0, "Inert solid"},
+	{"Sulfur", "Sodium sulfide",   "Na2S", 0.6, 0.0, 0.2, 0.0, "H2S source"},
+	{"Sulfur", "DMSO",             "DMSO", 0.2, 0.0, 0.0, 0.0, "Cryoprotectant / solvent"},
+
+	// -------- Nitrogen --------
+	{"Nitrogen", "Nitrate",       "NO3-", 0.0, 0.6, 0.0, 0.0, "Nitrogen source"},
+	{"Nitrogen", "Nitrite",       "NO2-", 0.3, 0.4, 0.2, 0.0, "Toxic above 1mM"},
+	{"Nitrogen", "Urea",          "Urea", 0.6, 0.0, 0.0, 0.0, "Chaotrope"},
+
+	// -------- Essential metals --------
+	{"Essential metals", "Magnesium ion", "Mg2+", 0.0, 0.3, 0.0, 0.0, "Enzyme cofactor"},
+	{"Essential metals", "Calcium ion",   "Ca2+", 0.1, 0.2, 0.0, 0.0, "Signaling ion"},
+	{"Essential metals", "Potassium ion", "K+",   0.0, 0.3, 0.0, 0.0, "Osmolyte"},
+	{"Essential metals", "Iron(II)",      "Fe2+", 0.1, 0.5, 0.1, 0.0, "Fenton chemistry"},
+	{"Essential metals", "Iron(III)",     "Fe3+", 0.1, 0.4, 0.0, 0.0, "Electron carrier"},
+	{"Essential metals", "Zinc ion",      "Zn2+", 0.1, 0.4, 0.0, 0.0, "Enzyme cofactor"},
+	{"Essential metals", "Copper(II)",    "Cu2+", 0.2, 0.3, 0.2, 0.0, "Redox-active"},
+
+	// -------- Heavy / toxic metals --------
+	{"Heavy metals", "Lead ion",      "Pb2+", 0.85, 0.0, 0.0, 0.05, "Neurotoxin"},
+	{"Heavy metals", "Mercury ion",   "Hg2+", 0.95, 0.0, 0.0, 0.05, "Thiol-reactive"},
+	{"Heavy metals", "Cadmium ion",   "Cd2+", 0.85, 0.0, 0.0, 0.03, "Nephrotoxin"},
+	{"Heavy metals", "Arsenate",      "AsO4", 0.70, 0.0, 0.0, 0.10, "DNA damage"},
+	{"Heavy metals", "Chromate",      "Cr6+", 0.90, 0.0, 0.3, 0.00, "Carcinogen"},
+	{"Heavy metals", "Nickel ion",    "Ni2+", 0.60, 0.0, 0.0, 0.02, "Allergen; toxic"},
+
+	// -------- Antibiotics --------
+	{"Antibiotics", "Ampicillin",      "Amp",  0.6, 0.0, 0.0, 0.0, "beta-lactam"},
+	{"Antibiotics", "Kanamycin",       "Kan",  0.6, 0.0, 0.0, 0.0, "Aminoglycoside"},
+	{"Antibiotics", "Chloramphenicol", "Cm",   0.5, 0.0, 0.0, 0.0, "Ribosome inhibitor"},
+	{"Antibiotics", "Tetracycline",    "Tet",  0.5, 0.0, 0.0, 0.0, "Bacteriostatic"},
+	{"Antibiotics", "Puromycin",       "Puro", 0.7, 0.0, 0.0, 0.0, "Premature stop"},
+	{"Antibiotics", "Rifampicin",      "Rif",  0.6, 0.0, 0.0, 0.0, "RNA pol inhibitor"},
+	{"Antibiotics", "Ciprofloxacin",   "Cip",  0.6, 0.0, 0.0, 0.0, "DNA gyrase inhibitor"},
+
+	// -------- Solvents & Detergents --------
+	{"Solvents & Detergents", "Ethanol",        "EtOH",  0.5, 0.0, 0.1, 0.0, "Membrane disruption"},
+	{"Solvents & Detergents", "Methanol",       "MeOH",  0.7, 0.0, 0.1, 0.0, "Toxic solvent"},
+	{"Solvents & Detergents", "SDS",            "SDS",   0.9, 0.0, 0.0, 0.0, "Membrane disruptor"},
+	{"Solvents & Detergents", "Triton X-100",   "TX100", 0.7, 0.0, 0.0, 0.0, "Nonionic detergent"},
+	{"Solvents & Detergents", "Chloroform",     "CHCl3", 0.6, 0.0, 0.0, 0.0, "Hepatotoxic solvent"},
+	{"Solvents & Detergents", "Formaldehyde",   "FA",    0.7, 0.0, 0.0, 0.0, "Crosslinker / fixative"},
+	{"Solvents & Detergents", "Acetonitrile",   "ACN",   0.5, 0.0, 0.0, 0.0, "Polar aprotic solvent"},
+
+	// -------- Salts & Buffers --------
+	{"Salts & Buffers", "Sodium chloride",    "NaCl",  0.0, 0.3, 0.0, 0.0, "Osmolyte"},
+	{"Salts & Buffers", "Potassium chloride", "KCl",   0.0, 0.3, 0.0, 0.0, "Potassium source"},
+	{"Salts & Buffers", "Magnesium chloride", "MgCl2", 0.0, 0.3, 0.0, 0.0, "Enzyme cofactor"},
+	{"Salts & Buffers", "Calcium chloride",   "CaCl2", 0.1, 0.2, 0.0, 0.0, "Signaling ion"},
+	{"Salts & Buffers", "Tris buffer",        "Tris",  0.0, 0.0, 0.0, 0.0, "pH buffering"},
+
+	// -------- Sugars & Nutrients --------
+	{"Sugars & Nutrients", "Glucose",   "Glc", 0.0, 1.0, 0.0, 0.0, "Primary carbon source"},
+	{"Sugars & Nutrients", "Fructose",  "Fru", 0.0, 0.8, 0.0, 0.0, "Alternative carbon"},
+	{"Sugars & Nutrients", "Sucrose",   "Suc", 0.0, 0.7, 0.0, 0.0, "Disaccharide"},
+	{"Sugars & Nutrients", "Glycerol",  "Gly", 0.0, 0.5, 0.0, 0.0, "Osmolyte / carbon"},
+
+	// -------- Chelators & Inhibitors --------
+	{"Chelators & Inhibitors", "EDTA",          "EDTA", 0.3, 0.0, 0.0, 0.0, "Divalent cation chelator"},
+	{"Chelators & Inhibitors", "EGTA",          "EGTA", 0.2, 0.0, 0.0, 0.0, "Calcium-selective chelator"},
+	{"Chelators & Inhibitors", "DTT",           "DTT",  0.2, 0.0, 0.0, 0.0, "Reducing agent"},
+	{"Chelators & Inhibitors", "BME",           "BME",  0.2, 0.0, 0.0, 0.0, "Reducing agent"},
+	{"Chelators & Inhibitors", "Sodium azide",  "NaN3", 0.8, 0.0, 0.0, 0.0, "Cytochrome c oxidase inhibitor"},
+
+	// -------- Radioactive --------
+	{"Radioactive", "Uranium-238",   "U238",  0.70, 0.0, 0.0, 0.30, "Alpha emitter"},
+	{"Radioactive", "Uranium-235",   "U235",  0.70, 0.0, 0.0, 0.40, "Fissile isotope"},
+	{"Radioactive", "Plutonium-239", "Pu239", 0.90, 0.0, 0.0, 0.60, "Alpha + spontaneous fission"},
+	{"Radioactive", "Radium-226",    "Ra226", 0.90, 0.0, 0.0, 0.80, "Alpha"},
+	{"Radioactive", "Radon-222",     "Rn222", 0.80, 0.0, 0.0, 0.90, "Noble gas; alpha"},
+	{"Radioactive", "Cesium-137",    "Cs137", 0.80, 0.0, 0.0, 0.70, "Gamma emitter"},
+	{"Radioactive", "Strontium-90",  "Sr90",  0.70, 0.0, 0.0, 0.50, "Beta; bone-seeking"},
+	{"Radioactive", "Iodine-131",    "I131",  0.70, 0.0, 0.0, 0.60, "Beta + gamma; thyroid"},
+	{"Radioactive", "Cobalt-60",     "Co60",  0.60, 0.0, 0.0, 0.90, "Gamma; industrial"},
+	{"Radioactive", "Americium-241", "Am241", 0.70, 0.0, 0.0, 0.40, "Alpha; smoke detector"},
+	{"Radioactive", "Thorium-232",   "Th232", 0.60, 0.0, 0.0, 0.25, "Alpha; long half-life"},
+	{"Radioactive", "Phosphorus-32", "P32",   0.70, 0.0, 0.0, 0.60, "Beta emitter; DNA label"},
+	{"Radioactive", "Polonium-210",  "Po210", 0.95, 0.0, 0.0, 0.85, "Alpha; historical poison"},
+}
+
+type Chemex struct {
+	Concentrations map[string]float64
+}
+
+func NewChemex() *Chemex {
+	c := &Chemex{Concentrations: map[string]float64{}}
+	for _, s := range ChemSpeciesTable {
+		c.Concentrations[s.Formula] = 0
+	}
+	return c
+}
+
+func (c *Chemex) TotalToxicity() float64 {
+	total := 0.0
+	for _, s := range ChemSpeciesTable {
+		total += s.Toxicity * c.Concentrations[s.Formula]
+	}
+	return total
+}
+
+func (c *Chemex) TotalOxidant() float64 {
+	total := 0.0
+	for _, s := range ChemSpeciesTable {
+		total += s.Oxidant * c.Concentrations[s.Formula]
+	}
+	return total
+}
+
+func (c *Chemex) TotalRadiation() float64 {
+	total := 0.0
+	for _, s := range ChemSpeciesTable {
+		total += s.Radiation * c.Concentrations[s.Formula]
+	}
+	return total
+}
+
+func (c *Chemex) NutrientMultiplier() float64 {
+	m := 1.0
+	for _, s := range ChemSpeciesTable {
+		m += s.Nutrient * c.Concentrations[s.Formula] * 0.05
+	}
+	return m
+}

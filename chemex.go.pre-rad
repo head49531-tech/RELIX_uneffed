@@ -1,0 +1,65 @@
+package main
+
+type ChemSpecies struct {
+	Name        string
+	Formula     string
+	Toxicity    float64
+	Nutrient    float64
+	Oxidant     float64
+	Description string
+}
+
+var ChemSpeciesTable = []ChemSpecies{
+	// Water derivatives
+	{"Water",             "H2O",   0.0, 1.0, 0.0, "Neutral; mild nutrient"},
+	{"Hydrogen peroxide", "H2O2",  0.3, 0.0, 0.8, "Oxidant; toxic above 1mM"},
+	{"Hydroxyl radical",  "OH*",   0.9, 0.0, 1.0, "Highly reactive ROS"},
+	// Hydrogen derivatives
+	{"Hydrogen gas",      "H2",    0.0, 0.3, 0.0, "Electron donor; mildly beneficial"},
+	{"Proton",            "H+",    0.1, 0.0, 0.2, "pH effect"},
+	// Oxygen derivatives
+	{"Oxygen",            "O2",    0.0, 0.8, 0.0, "Terminal electron acceptor"},
+	{"Ozone",             "O3",    0.6, 0.0, 0.9, "Strong oxidant"},
+	{"Superoxide",        "O2-",   0.4, 0.0, 0.9, "ROS; would be scavenged by SOD"},
+	// Sulfur derivatives
+	{"Hydrogen sulfide",  "H2S",   0.5, 0.0, 0.3, "Toxic; signaling molecule at low conc"},
+	{"Sulfur dioxide",    "SO2",   0.4, 0.0, 0.4, "Irritant gas"},
+	{"Sulfuric acid",     "H2SO4", 0.7, 0.0, 0.1, "Highly acidic"},
+	{"Elemental sulfur",  "S8",    0.0, 0.0, 0.0, "Inert solid"},
+}
+
+type Chemex struct {
+	Concentrations map[string]float64
+}
+
+func NewChemex() *Chemex {
+	c := &Chemex{Concentrations: map[string]float64{}}
+	for _, s := range ChemSpeciesTable {
+		c.Concentrations[s.Formula] = 0
+	}
+	return c
+}
+
+func (c *Chemex) TotalToxicity() float64 {
+	total := 0.0
+	for _, s := range ChemSpeciesTable {
+		total += s.Toxicity * c.Concentrations[s.Formula]
+	}
+	return total
+}
+
+func (c *Chemex) TotalOxidant() float64 {
+	total := 0.0
+	for _, s := range ChemSpeciesTable {
+		total += s.Oxidant * c.Concentrations[s.Formula]
+	}
+	return total
+}
+
+func (c *Chemex) NutrientMultiplier() float64 {
+	m := 1.0
+	for _, s := range ChemSpeciesTable {
+		m += s.Nutrient * c.Concentrations[s.Formula] * 0.05
+	}
+	return m
+}

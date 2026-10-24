@@ -1,0 +1,516 @@
+package main
+
+import (
+	"fmt"
+	"image/color"
+	"sort"
+	"strconv"
+	"time"
+
+	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/canvas"
+	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/theme"
+	"fyne.io/fyne/v2/widget"
+)
+
+var nucleotideColors = map[byte]color.Color{
+	'A': color.RGBA{220, 80, 80, 255},
+	'T': color.RGBA{80, 200, 80, 255},
+	'G': color.RGBA{80, 120, 220, 255},
+	'C': color.RGBA{220, 200, 60, 255},
+}
+
+type UI struct {
+	window fyne.Window
+	sim    *Sim
+
+	tickLabel  *widget.Label
+	aliveLabel *widget.Label
+	genLabel   *widget.Label
+	envLabel   *widget.Label
+
+	playBtn  *widget.Button
+	stepBtn  *widget.Button
+	resetBtn *widget.Button
+
+	cellList *widget.List
+
+	genomeCanvas *fyne.Container
+	genomeScroll *container.Scroll
+	dnaText      *widget.Entry
+	selectedGene int
+
+	mrnaList    *widget.List
+	proteinList *widget.List
+
+	detailBox *fyne.Container
+	seriesCv  *canvas.Raster
+
+	muVal   *widget.Label
+	drVal   *widget.Label
+	daVal   *widget.Label
+	spVal   *widget.Label
+
+	muSlider *widget.Slider
+	drSlider *widget.Slider
+	daSlider *widget.Slider
+	spSlider *widget.Slider
+	mcEntry  *widget.Entry
+
+	selectedCell int
+	playing      bool
+	speed        time.Duration
+	nextTick     time.Time
+	stopCh       chan struct{}
+	sortedCache  []*Cell
+	seriesName   string
+}
+
+func NewUI(w fyne.Window) *UI {
+	u := &UI{
+		window:       w,
+		sim:          NewSim(DefaultParams(), time.Now().UnixNano()),
+		selectedCell: -1,
+		selectedGene: -1,
+		speed:        300 * time.Millisecond,
+		stopCh:       make(chan struct{}),
+		seriesName:   "MetA_enzyme",
+	}
+	u.buildUI()
+	u.startLoop()
+	u.render()
+	return u
+}
+
+func mono(s string) *widget.Label {
+	return widget.NewLabelWithStyle(s, fyne.TextAlignLeading, fyne.TextStyle{Monospace: true})
+}
+
+func (u *UI) buildUI() {
+	u.tickLabel = mono("tick 0")
+	u.aliveLabel = mono("alive 0")
+	u.genLabel = mono("gen 0")
+	u.envLabel = mono("env 0")
+
+	u.playBtn = widget.NewButtonWithIcon("Play", theme.MediaPlayIcon(), u.togglePlay)
+	u.stepBtn = widget.NewButtonWithIcon("Step", theme.MediaSkipNextIcon(), u.step)
+	u.resetBtn = widget.NewButtonWithIcon("Reset", theme.ViewRefreshIcon(), u.reset)
+	exportTxtBtn := widget.NewButtonWithIcon("Export .txt", theme.DocumentSaveIcon(), u.exportTXT)
+	exportPdfBtn := widget.NewButtonWithIcon("Export .pdf", theme.DocumentIcon(), u.exportPDF)
+
+	top := container.NewHBox(
+		widget.NewLabelWithStyle("RELIX", fyne.TextAlignLeading, fyne.TextStyle{Bold: true, Monospace: true}),
+		widget.NewSeparator(),
+		u.playBtn, u.stepBtn, u.resetBtn,
+		widget.NewSeparator(),
+		u.tickLabel, u.aliveLabel, u.genLabel, u.envLabel,
+		widget.NewSeparator(),
+		exportTxtBtn, exportPdfBtn,
+	)
+
+	// --- Cell list ---
+	u.cellList = widget.NewList(
+		func() int { return len(u.sortedCache) },
+		func() fyne.CanvasObject {
+			return widget.NewLabelWithStyle("template", fyne.TextAlignLeading, fyne.TextStyle{Monospace: true})
+		},
+		func(i widget.ListItemID, o fyne.CanvasObject) {
+			if i >= len(u.sortedCache) {
+				return
+			}
+			c := u.sortedCache[i]
+			mark := "●"
+			if !c.Alive {
+				mark = "○"
+			}
+			o.(*widget.Label).SetText(fmt.Sprintf("%s #%d g%d", mark, c.ID, c.Generation))
+		},
+	)
+	u.cellList.OnSelected = func(id widget.ListItemID) {
+		if id >= len(u.sortedCache) {
+			return
+		}
+		u.selectedCell = u.sortedCache[id].ID
+		u.selectedGene = -1
+		u.renderGenome()
+		u.refreshSpecies()
+		u.refreshDetail()
+	}
+	left := container.NewBorder(
+		widget.NewLabelWithStyle("Cells", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		nil, nil, nil, u.cellList,
+	)
+
+	// --- Genome view ---
+	u.genomeCanvas = container.NewHBox()
+	u.genomeScroll = container.NewHScroll(u.genomeCanvas)
+	u.dnaText = widget.NewMultiLineEntry()
+	u.dnaText.Wrapping = fyne.TextWrapBreak
+	u.dnaText.OnChanged = nil
+
+	dnaApply := widget.NewButton("Apply DNA Edit", func() {
+		c := u.getSelectedCell()
+		if c == nil {
+			return
+		}
+		c.Genome.DNA = []byte(u.dnaText.Text)
+		// clamp genes
+		for _, g := range c.Genome.Genes {
+			if g.CDSEnd > len(c.Genome.DNA) {
+				g.CDSEnd = len(c.Genome.DNA)
+			}
+		}
+		u.renderGenome()
+		u.refreshSpecies()
+	})
+
+	geneLabel := widget.NewLabelWithStyle("Genome (click gene to select, click nucleotide to edit)", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+
+	centerInner := container.NewBorder(
+		container.NewVBox(geneLabel, u.genomeScroll, widget.NewLabel("Raw DNA:"), u.dnaText, dnaApply),
+		nil, nil, nil, nil,
+	)
+
+	// --- Species panels ---
+	u.mrnaList = widget.NewList(
+		func() int { return 0 },
+		func() fyne.CanvasObject { return mono("template") },
+		func(i widget.ListItemID, o fyne.CanvasObject) {},
+	)
+	u.proteinList = widget.NewList(
+		func() int { return 0 },
+		func() fyne.CanvasObject { return mono("template") },
+		func(i widget.ListItemID, o fyne.CanvasObject) {},
+	)
+
+	mrnaLabel := widget.NewLabelWithStyle("mRNA (transcripts)", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	proteinLabel := widget.NewLabelWithStyle("Proteins", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+
+	speciesPanel := container.NewVBox(
+		mrnaLabel, u.mrnaList,
+		widget.NewSeparator(),
+		proteinLabel, u.proteinList,
+	)
+
+	// --- Detail + series ---
+	u.detailBox = container.NewVBox(widget.NewLabelWithStyle("— select a cell —", fyne.TextAlignLeading, fyne.TextStyle{Italic: true}))
+	
+	u.seriesCv = canvas.NewRasterWithPixels(u.seriesPixels)
+	u.seriesCv.SetMinSize(fyne.NewSize(280, 80))
+
+	seriesSelector := widget.NewSelect([]string{"MetA_enzyme", "RegA_TF", "RegB_TF", "ATP", "Glucose", "Population"}, func(s string) {
+		u.seriesName = s
+		u.render()
+	})
+	seriesSelector.SetSelected(u.seriesName)
+
+	right := container.NewVScroll(container.NewVBox(
+		u.detailBox,
+		widget.NewSeparator(),
+		speciesPanel,
+		widget.NewSeparator(),
+		widget.NewLabelWithStyle("Time series", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		seriesSelector,
+		u.seriesCv,
+	))
+
+	// --- Bottom params ---
+	p := u.sim.Params
+	u.muSlider = widget.NewSlider(0, 0.5)
+	u.muSlider.Value = p.MutationRate
+	u.muVal = mono(fmt.Sprintf("%.2f", p.MutationRate))
+	u.muSlider.OnChanged = func(v float64) {
+		u.muVal.SetText(fmt.Sprintf("%.2f", v))
+		u.sim.Params.MutationRate = v
+	}
+
+	u.drSlider = widget.NewSlider(0, 0.02)
+	u.drSlider.Value = p.BaseDeathRate
+	u.drVal = mono(fmt.Sprintf("%.4f", p.BaseDeathRate))
+	u.drSlider.OnChanged = func(v float64) {
+		u.drVal.SetText(fmt.Sprintf("%.4f", v))
+		u.sim.Params.BaseDeathRate = v
+	}
+
+	u.daSlider = widget.NewSlider(2, 30)
+	u.daSlider.Value = p.DivisionATP
+	u.daVal = mono(fmt.Sprintf("%.1f", p.DivisionATP))
+	u.daSlider.OnChanged = func(v float64) {
+		u.daVal.SetText(fmt.Sprintf("%.1f", v))
+		u.sim.Params.DivisionATP = v
+	}
+
+	u.spSlider = widget.NewSlider(20, 1000)
+	u.spSlider.Value = 300
+	u.spVal = mono("300ms")
+	u.spSlider.OnChanged = func(v float64) {
+		u.speed = time.Duration(v) * time.Millisecond
+		u.spVal.SetText(fmt.Sprintf("%dms", int(v)))
+	}
+
+	u.mcEntry = widget.NewEntry()
+	u.mcEntry.SetText(strconv.Itoa(p.MaxCells))
+	u.mcEntry.OnChanged = func(s string) {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 {
+			u.sim.Params.MaxCells = n
+		}
+	}
+
+	bottom := container.NewHBox(
+		widget.NewLabel("Mutation"), u.muSlider, u.muVal,
+		widget.NewSeparator(),
+		widget.NewLabel("Death"), u.drSlider, u.drVal,
+		widget.NewSeparator(),
+		widget.NewLabel("Division ATP"), u.daSlider, u.daVal,
+		widget.NewSeparator(),
+		widget.NewLabel("Max cells"), u.mcEntry,
+		widget.NewSeparator(),
+		widget.NewLabel("Speed"), u.spSlider, u.spVal,
+	)
+
+	mainSplit := container.NewHSplit(left, container.NewHSplit(centerInner, right))
+	mainSplit.SetOffset(0.16)
+	main := container.NewBorder(top, bottom, nil, nil, mainSplit)
+	u.window.SetContent(main)
+}
+
+func (u *UI) startLoop() {
+	go func() {
+		for {
+			select {
+			case <-u.stopCh:
+				return
+			default:
+			}
+			if u.playing && time.Now().After(u.nextTick) {
+				fyne.Do(func() {
+					u.sim.Step()
+					u.render()
+				})
+				u.nextTick = time.Now().Add(u.speed)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+}
+
+func (u *UI) togglePlay() {
+	u.playing = !u.playing
+	if u.playing {
+		u.playBtn.SetText("Pause")
+		u.playBtn.SetIcon(theme.MediaPauseIcon())
+		u.nextTick = time.Now()
+	} else {
+		u.playBtn.SetText("Play")
+		u.playBtn.SetIcon(theme.MediaPlayIcon())
+	}
+}
+
+func (u *UI) step() {
+	u.sim.Step()
+	u.render()
+}
+
+func (u *UI) reset() {
+	u.sim = NewSim(u.sim.Params, time.Now().UnixNano())
+	u.selectedCell = -1
+	u.selectedGene = -1
+	u.render()
+}
+
+func (u *UI) getSelectedCell() *Cell {
+	if u.selectedCell < 0 {
+		return nil
+	}
+	for _, c := range u.sim.Cells {
+		if c.ID == u.selectedCell {
+			return c
+		}
+	}
+	return nil
+}
+
+func (u *UI) render() {
+	u.tickLabel.SetText(fmt.Sprintf("tick %d", u.sim.Tick))
+	u.aliveLabel.SetText(fmt.Sprintf("alive %d", u.sim.AliveCount()))
+	u.genLabel.SetText(fmt.Sprintf("gen %d", u.sim.MaxGen()))
+	u.envLabel.SetText(fmt.Sprintf("env %.1f", u.sim.EnvPool))
+
+	u.sortedCache = u.sim.SortedCells()
+	u.cellList.Refresh()
+
+	if u.selectedCell < 0 && len(u.sortedCache) > 0 {
+		u.selectedCell = u.sortedCache[0].ID
+	}
+
+	u.renderGenome()
+	u.refreshSpecies()
+	u.refreshDetail()
+
+	u.seriesCv.Refresh()
+}
+
+func (u *UI) renderGenome() {
+	c := u.getSelectedCell()
+	u.genomeCanvas.Objects = nil
+	if c == nil {
+		u.genomeCanvas.Refresh()
+		return
+	}
+
+	// Gene annotations row
+	geneRow := container.NewHBox()
+	for gi, gene := range c.Genome.Genes {
+		g := gene
+		idx := gi
+		colorKey := color.RGBA{uint8(60 + (gi*60)%180), 100, 200, 200}
+		bar := canvas.NewRectangle(colorKey)
+		w := float32(gene.PromoterStart) * 12
+		bar.Move(fyne.NewPos(w, 0))
+		bar.Resize(fyne.NewSize(float32(gene.Length())*12, 18))
+		geneRow.Add(bar)
+
+		btn := widget.NewButton(gene.Name, func() {
+			u.selectedGene = idx
+			u.renderGenome()
+		})
+		_ = g
+		geneRow.Add(btn)
+	}
+
+	// Nucleotide row
+	nucRow := container.NewHBox()
+	for i, b := range c.Genome.DNA {
+		pos := i
+		base := b
+		cell := canvas.NewRectangle(nucleotideColors[base])
+		if u.selectedGene >= 0 && u.selectedGene < len(c.Genome.Genes) {
+			gene := c.Genome.Genes[u.selectedGene]
+			if pos >= gene.PromoterStart && pos < gene.CDSEnd {
+				cell.StrokeColor = color.White
+				cell.StrokeWidth = 2
+			}
+		}
+		cell.SetMinSize(fyne.NewSize(10, 20))
+		cellContainer := container.NewStack(cell)
+		bg := widget.NewButton("", func() {
+			// cycle nucleotide
+			cur := c.Genome.DNA[pos]
+			next := byte('A')
+			switch cur {
+			case 'A': next = 'T'
+			case 'T': next = 'G'
+			case 'G': next = 'C'
+			case 'C': next = 'A'
+			}
+			c.Genome.DNA[pos] = next
+			u.renderGenome()
+			u.refreshSpecies()
+		})
+		bg.Importance = widget.LowImportance
+		nucRow.Add(container.NewMax(cellContainer, bg))
+	}
+
+	u.genomeCanvas.Objects = []fyne.CanvasObject{
+		container.NewVBox(geneRow, nucRow),
+	}
+	u.genomeCanvas.Refresh()
+
+	u.dnaText.SetText(string(c.Genome.DNA))
+}
+
+func (u *UI) refreshSpecies() {
+	c := u.getSelectedCell()
+	if c == nil {
+		return
+	}
+
+	// mRNA list
+	mrnaNames := make([]string, 0, len(c.MRNA))
+	for k := range c.MRNA {
+		mrnaNames = append(mrnaNames, k)
+	}
+	sort.Strings(mrnaNames)
+	u.mrnaList.Length = func() int { return len(mrnaNames) }
+	u.mrnaList.CreateItem = func() fyne.CanvasObject { return mono("") }
+	u.mrnaList.UpdateItem = func(i widget.ListItemID, o fyne.CanvasObject) {
+		if i >= len(mrnaNames) {
+			return
+		}
+		name := mrnaNames[i]
+		count := c.MRNA[name]
+		// find gene to find length
+		var gene *Gene
+		for _, g := range c.Genome.Genes {
+			if g.Name == name {
+				gene = g
+				break
+			}
+		}
+		length := 0
+		if gene != nil {
+			length = gene.CDSEnd - gene.CDSStart
+		}
+		o.(*widget.Label).SetText(fmt.Sprintf("%-8s %.2f  (%dnt)", name, count, length))
+	}
+	u.mrnaList.Refresh()
+
+	// Protein list
+	protNames := make([]string, 0, len(c.Proteins))
+	for k := range c.Proteins {
+		protNames = append(protNames, k)
+	}
+	sort.Strings(protNames)
+	u.proteinList.Length = func() int { return len(protNames) }
+	u.proteinList.CreateItem = func() fyne.CanvasObject { return mono("") }
+	u.proteinList.UpdateItem = func(i widget.ListItemID, o fyne.CanvasObject) {
+		if i >= len(protNames) {
+			return
+		}
+		name := protNames[i]
+		count := c.Proteins[name]
+		role := "?"
+		if name == "MetA_enzyme" {
+			role = "enzyme"
+		} else if name == "RegA_TF" || name == "RegB_TF" {
+			role = "transcription factor"
+		}
+		o.(*widget.Label).SetText(fmt.Sprintf("%-14s %6.2f  [%s]", name, count, role))
+	}
+	u.proteinList.Refresh()
+}
+
+func (u *UI) refreshDetail() {
+	c := u.getSelectedCell()
+	if c == nil {
+		u.detailBox.Objects = []fyne.CanvasObject{
+			widget.NewLabelWithStyle("— select a cell —", fyne.TextAlignLeading, fyne.TextStyle{Italic: true}),
+		}
+		u.detailBox.Refresh()
+		return
+	}
+	status := "ALIVE"
+	if !c.Alive {
+		status = "DEAD: " + c.DeathCause
+	}
+	u.detailBox.Objects = []fyne.CanvasObject{
+		widget.NewLabelWithStyle(fmt.Sprintf("Cell #%d", c.ID), fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		mono(fmt.Sprintf("status:    %s", status)),
+		mono(fmt.Sprintf("gen:       %d", c.Generation)),
+		mono(fmt.Sprintf("age:       %d", c.Age)),
+		mono(fmt.Sprintf("ATP:       %.2f", c.ATP)),
+		mono(fmt.Sprintf("glucose:   %.2f", c.Glucose)),
+		mono(fmt.Sprintf("divisions: %d", c.Divisions)),
+		mono(fmt.Sprintf("total ATP: %.1f", c.TotalATPProduced)),
+		mono(fmt.Sprintf("genes:     %d", len(c.Genome.Genes))),
+		mono(fmt.Sprintf("mRNA:      %d species", len(c.MRNA))),
+		mono(fmt.Sprintf("proteins:  %d species", len(c.Proteins))),
+	}
+	u.detailBox.Refresh()
+}
+
+// Additional helper referenced by canvas.NewRasterWithPixels
+func (u *UI) seriesPixels(x, y, w, h int) color.Color {
+	return color.RGBA{0, 0, 0, 255}
+}

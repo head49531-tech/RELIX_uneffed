@@ -1,0 +1,119 @@
+package main
+
+type ChemSpecies struct {
+	Name        string
+	Formula     string
+	Toxicity    float64
+	Nutrient    float64
+	Oxidant     float64
+	Radiation   float64
+	Description string
+}
+
+var ChemSpeciesTable = []ChemSpecies{
+	// --- Water derivatives ---
+	{"Water",             "H2O",   0.0, 1.0, 0.0, 0.0, "Neutral; mild nutrient"},
+	{"Hydrogen peroxide", "H2O2",  0.3, 0.0, 0.8, 0.0, "Oxidant; toxic above 1mM"},
+	{"Hydroxyl radical",  "OH*",   0.9, 0.0, 1.0, 0.0, "Highly reactive ROS"},
+	// --- Hydrogen ---
+	{"Hydrogen gas",      "H2",    0.0, 0.3, 0.0, 0.0, "Electron donor"},
+	{"Proton",            "H+",    0.1, 0.0, 0.2, 0.0, "pH effect"},
+	// --- Oxygen ---
+	{"Oxygen",            "O2",    0.0, 0.8, 0.0, 0.0, "Terminal electron acceptor"},
+	{"Ozone",             "O3",    0.6, 0.0, 0.9, 0.0, "Strong oxidant"},
+	{"Superoxide",        "O2-",   0.4, 0.0, 0.9, 0.0, "ROS"},
+	// --- Sulfur ---
+	{"Hydrogen sulfide",  "H2S",   0.5, 0.0, 0.3, 0.0, "Signaling at low conc"},
+	{"Sulfur dioxide",    "SO2",   0.4, 0.0, 0.4, 0.0, "Irritant"},
+	{"Sulfuric acid",     "H2SO4", 0.7, 0.0, 0.1, 0.0, "Strong acid"},
+	{"Elemental sulfur",  "S8",    0.0, 0.0, 0.0, 0.0, "Inert solid"},
+	// --- Chlorine ---
+	{"Chlorine gas",        "Cl2",   0.9, 0.0, 0.7, 0.0, "WWI gas; respiratory"},
+	{"Hydrochloric acid",   "HCl",   0.6, 0.0, 0.1, 0.0, "Strong acid"},
+	{"Hypochlorous acid",   "HOCl",  0.5, 0.0, 0.9, 0.0, "Bleach; oxidant"},
+	{"Sodium hypochlorite", "NaClO", 0.4, 0.0, 0.8, 0.0, "Household bleach"},
+	{"Chlorine dioxide",    "ClO2",  0.6, 0.0, 1.0, 0.0, "Industrial oxidant"},
+	{"Chloride ion",        "Cl-",   0.0, 0.4, 0.0, 0.0, "Essential anion"},
+	// --- Radioactive ---
+	{"Uranium-238",         "U238",  0.7, 0.0, 0.0, 0.3, "Alpha emitter"},
+	{"Uranium-235",         "U235",  0.7, 0.0, 0.0, 0.4, "Fissile"},
+	{"Plutonium-239",       "Pu239", 0.9, 0.0, 0.0, 0.6, "Alpha + spontaneous fission"},
+	{"Radium-226",          "Ra226", 0.9, 0.0, 0.0, 0.8, "Alpha"},
+	{"Radon-222",           "Rn222", 0.8, 0.0, 0.0, 0.9, "Noble gas; alpha"},
+	{"Cesium-137",          "Cs137", 0.8, 0.0, 0.0, 0.7, "Gamma emitter"},
+	{"Strontium-90",        "Sr90",  0.7, 0.0, 0.0, 0.5, "Beta; bone-seeking"},
+	{"Iodine-131",          "I131",  0.7, 0.0, 0.0, 0.6, "Beta + gamma"},
+	{"Cobalt-60",           "Co60",  0.6, 0.0, 0.0, 0.9, "Gamma; industrial"},
+	{"Americium-241",       "Am241", 0.7, 0.0, 0.0, 0.4, "Alpha; smoke detector"},
+	{"Thorium-232",         "Th232", 0.6, 0.0, 0.0, 0.25, "Alpha; long half-life"},
+	// --- Antibiotics ---
+	{"Ampicillin",          "Amp",   0.6, 0.0, 0.0, 0.0, "beta-lactam; cell wall"},
+	{"Kanamycin",           "Kan",   0.6, 0.0, 0.0, 0.0, "Aminoglycoside; ribosome"},
+	{"Chloramphenicol",     "Cm",    0.5, 0.0, 0.0, 0.0, "Ribosome; broad spectrum"},
+	{"Tetracycline",        "Tet",   0.5, 0.0, 0.0, 0.0, "Ribosome; bacteriostatic"},
+	{"Puromycin",           "Puro",  0.7, 0.0, 0.0, 0.0, "Ribosome; premature stop"},
+	// --- Heavy metals ---
+	{"Lead ion",            "Pb2+",  0.85, 0.0, 0.0, 0.05, "Neurotoxin"},
+	{"Mercury ion",         "Hg2+",  0.95, 0.0, 0.0, 0.05, "Thiol-reactive"},
+	{"Cadmium ion",         "Cd2+",  0.85, 0.0, 0.0, 0.03, "Nephrotoxin"},
+	{"Arsenate",            "AsO4",  0.7, 0.0, 0.0, 0.10, "DNA damage; arsenic"},
+	// --- Salts ---
+	{"Magnesium chloride",  "MgCl2", 0.0, 0.3, 0.0, 0.0, "Enzyme cofactor"},
+	{"Calcium chloride",    "CaCl2", 0.1, 0.2, 0.0, 0.0, "Signaling ion"},
+	{"Potassium chloride",  "KCl",   0.0, 0.3, 0.0, 0.0, "Potassium source"},
+	// --- Solvents / detergents ---
+	{"Ethanol",             "EtOH",  0.5, 0.0, 0.1, 0.0, "Membrane disruption"},
+	{"Methanol",            "MeOH",  0.7, 0.0, 0.1, 0.0, "Toxic solvent"},
+	{"SDS",                 "SDS",   0.9, 0.0, 0.0, 0.0, "Detergent; membrane disruptor"},
+	// --- Nitrogen ---
+	{"Ammonia",             "NH3",   0.4, 0.5, 0.0, 0.0, "Nitrogen source; pH-sensitive"},
+	{"Nitrate",             "NO3-",  0.0, 0.6, 0.0, 0.0, "Nitrogen source"},
+	{"Nitric oxide",        "NO",    0.3, 0.0, 0.5, 0.1, "Signaling; ROS-like"},
+	// --- Chelators / stress ---
+	{"EDTA",                "EDTA",  0.3, 0.0, 0.0, 0.0, "Mg2+ chelator"},
+	{"Urea",                "Urea",  0.6, 0.0, 0.0, 0.0, "Chaotrope; protein unfolding"},
+}
+
+type Chemex struct {
+	Concentrations map[string]float64
+}
+
+func NewChemex() *Chemex {
+	c := &Chemex{Concentrations: map[string]float64{}}
+	for _, s := range ChemSpeciesTable {
+		c.Concentrations[s.Formula] = 0
+	}
+	return c
+}
+
+func (c *Chemex) TotalToxicity() float64 {
+	total := 0.0
+	for _, s := range ChemSpeciesTable {
+		total += s.Toxicity * c.Concentrations[s.Formula]
+	}
+	return total
+}
+
+func (c *Chemex) TotalOxidant() float64 {
+	total := 0.0
+	for _, s := range ChemSpeciesTable {
+		total += s.Oxidant * c.Concentrations[s.Formula]
+	}
+	return total
+}
+
+func (c *Chemex) TotalRadiation() float64 {
+	total := 0.0
+	for _, s := range ChemSpeciesTable {
+		total += s.Radiation * c.Concentrations[s.Formula]
+	}
+	return total
+}
+
+func (c *Chemex) NutrientMultiplier() float64 {
+	m := 1.0
+	for _, s := range ChemSpeciesTable {
+		m += s.Nutrient * c.Concentrations[s.Formula] * 0.05
+	}
+	return m
+}

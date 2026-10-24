@@ -1,0 +1,93 @@
+package main
+
+type ChemSpecies struct {
+	Name        string
+	Formula     string
+	Toxicity    float64
+	Nutrient    float64
+	Oxidant     float64
+	Radiation   float64
+	Description string
+}
+
+var ChemSpeciesTable = []ChemSpecies{
+	// Water derivatives
+	{"Water",             "H2O",   0.0, 1.0, 0.0, 0.0, "Neutral; mild nutrient"},
+	{"Hydrogen peroxide", "H2O2",  0.3, 0.0, 0.8, 0.0, "Oxidant; toxic above 1mM"},
+	{"Hydroxyl radical",  "OH*",   0.9, 0.0, 1.0, 0.0, "Highly reactive ROS"},
+	// Hydrogen derivatives
+	{"Hydrogen gas",      "H2",    0.0, 0.3, 0.0, 0.0, "Electron donor; mildly beneficial"},
+	{"Proton",            "H+",    0.1, 0.0, 0.2, 0.0, "pH effect"},
+	// Oxygen derivatives
+	{"Oxygen",            "O2",    0.0, 0.8, 0.0, 0.0, "Terminal electron acceptor"},
+	{"Ozone",             "O3",    0.6, 0.0, 0.9, 0.0, "Strong oxidant"},
+	{"Superoxide",        "O2-",   0.4, 0.0, 0.9, 0.0, "ROS; would be scavenged by SOD"},
+	// Sulfur derivatives
+	{"Hydrogen sulfide",  "H2S",   0.5, 0.0, 0.3, 0.0, "Toxic; signaling molecule at low conc"},
+	{"Sulfur dioxide",    "SO2",   0.4, 0.0, 0.4, 0.0, "Irritant gas"},
+	{"Sulfuric acid",     "H2SO4", 0.7, 0.0, 0.1, 0.0, "Highly acidic"},
+	{"Elemental sulfur",  "S8",    0.0, 0.0, 0.0, 0.0, "Inert solid"},
+	// Chlorine derivatives
+	{"Chlorine gas",        "Cl2",   0.9, 0.0, 0.7, 0.0, "WWI-era chemical weapon; respiratory"},
+	{"Hydrochloric acid",   "HCl",   0.6, 0.0, 0.1, 0.0, "Strong acid"},
+	{"Hypochlorous acid",   "HOCl",  0.5, 0.0, 0.9, 0.0, "Bleach; oxidant"},
+	{"Sodium hypochlorite", "NaClO", 0.4, 0.0, 0.8, 0.0, "Household bleach"},
+	{"Chlorine dioxide",    "ClO2",  0.6, 0.0, 1.0, 0.0, "Industrial oxidant"},
+	{"Chloride ion",        "Cl-",   0.0, 0.4, 0.0, 0.0, "Essential anion"},
+	// Radioactive elements (all + gamma emitters unless noted)
+	{"Uranium-238",         "U238",  0.7, 0.0, 0.0, 0.3, "Alpha emitter; long half-life"},
+	{"Uranium-235",         "U235",  0.7, 0.0, 0.0, 0.4, "Fissile; enriched uranium"},
+	{"Plutonium-239",       "Pu239", 0.9, 0.0, 0.0, 0.6, "Alpha + spontaneous fission"},
+	{"Radium-226",          "Ra226", 0.9, 0.0, 0.0, 0.8, "Alpha; historically in glow paint"},
+	{"Radon-222",           "Rn222", 0.8, 0.0, 0.0, 0.9, "Noble gas; alpha; lung carcinogen"},
+	{"Cesium-137",          "Cs137", 0.8, 0.0, 0.0, 0.7, "Gamma; fission product"},
+	{"Strontium-90",        "Sr90",  0.7, 0.0, 0.0, 0.5, "Beta; bone-seeking"},
+	{"Iodine-131",          "I131",  0.7, 0.0, 0.0, 0.6, "Beta + gamma; thyroid-seeking"},
+	{"Cobalt-60",           "Co60",  0.6, 0.0, 0.0, 0.9, "Gamma; industrial irradiation"},
+	{"Americium-241",       "Am241", 0.7, 0.0, 0.0, 0.4, "Alpha; smoke detector source"},
+	{"Thorium-232",         "Th232", 0.6, 0.0, 0.0, 0.25, "Alpha; long half-life"},
+}
+
+type Chemex struct {
+	Concentrations map[string]float64
+}
+
+func NewChemex() *Chemex {
+	c := &Chemex{Concentrations: map[string]float64{}}
+	for _, s := range ChemSpeciesTable {
+		c.Concentrations[s.Formula] = 0
+	}
+	return c
+}
+
+func (c *Chemex) TotalToxicity() float64 {
+	total := 0.0
+	for _, s := range ChemSpeciesTable {
+		total += s.Toxicity * c.Concentrations[s.Formula]
+	}
+	return total
+}
+
+func (c *Chemex) TotalOxidant() float64 {
+	total := 0.0
+	for _, s := range ChemSpeciesTable {
+		total += s.Oxidant * c.Concentrations[s.Formula]
+	}
+	return total
+}
+
+func (c *Chemex) TotalRadiation() float64 {
+	total := 0.0
+	for _, s := range ChemSpeciesTable {
+		total += s.Radiation * c.Concentrations[s.Formula]
+	}
+	return total
+}
+
+func (c *Chemex) NutrientMultiplier() float64 {
+	m := 1.0
+	for _, s := range ChemSpeciesTable {
+		m += s.Nutrient * c.Concentrations[s.Formula] * 0.05
+	}
+	return m
+}
